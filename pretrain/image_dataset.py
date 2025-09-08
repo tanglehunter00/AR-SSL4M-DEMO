@@ -58,16 +58,23 @@ class get_custom_dataset(Dataset):
     def __getitem__(self, index):
         ann = self.ann[index]
 
-        if 'patch_random_spatial' in ann:
-            input_image = np.load(ann)
-            start, stride = random.randint(0, 63), 8
-            z_size = self.img_size[2] // self.series_length
-            input_image = torch.tensor(input_image)
-            input_image = torch.cat((input_image[..., start: start + z_size],
-                                     input_image[..., start + stride: start + stride + z_size],
-                                     input_image[..., start + 2 * stride: start + 2 * stride + z_size],
-                                     input_image[..., start + 3 * stride: start + 3 * stride + z_size]), dim=-1).flatten()
+        # 加载预处理好的数据
+        input_image = np.load(ann)
+        input_image = torch.tensor(input_image)
+        
+        # 对于空间序列，使用原始数据或进行子采样
+        if 'patch_random_spatial' in ann or 'RSNA_CSFD' in ann:
+            # 如果需要series_length > 1，进行子采样
+            if self.series_length > 1:
+                start, stride = random.randint(0, max(0, self.img_size[2] - self.series_length * 8)), 8
+                z_size = self.img_size[2] // self.series_length
+                input_image = torch.cat((input_image[..., start: start + z_size],
+                                         input_image[..., start + stride: start + stride + z_size],
+                                         input_image[..., start + 2 * stride: start + 2 * stride + z_size],
+                                         input_image[..., start + 3 * stride: start + 3 * stride + z_size]), dim=-1)
+            input_image = input_image.flatten()
         else:
+            # 处理其他类型的数据（多序列）
             ann_split_list = ann.split(',')
             for split_id, ann_split in enumerate(ann_split_list):
                 input_image_single = np.load(ann_split)

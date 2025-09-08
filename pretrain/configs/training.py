@@ -11,7 +11,7 @@ class train_config:
     gradient_accumulation_steps: int=1
     gradient_clipping: bool=False
     gradient_clipping_threshold: float = 1.0
-    num_epochs: int=50
+    num_epochs: int=5
     warmup_epochs:int=0
     num_workers_dataloader: int=6
     lr: float=1e-4
@@ -22,7 +22,7 @@ class train_config:
     mixed_precision: bool=False
     val_batch_size: int=1
     dataset = "custom_dataset"
-    output_dir: str="PATH/to/save/model"
+    output_dir: str="pretrain/save"
     freeze_layers: bool=False
     num_freeze_layers: int=1
     save_model: bool=True

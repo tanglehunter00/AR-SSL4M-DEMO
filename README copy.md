@@ -1,9 +1,8 @@
 # [AAAI 2025] Autoregressive Sequence Modeling for 3D Medical Image Representation
 
-This is an official PyTorch implementation of "[**Autoregressive Sequence Modeling for 3D Medical Image Representation**](https://arxiv.org/abs/2409.08691)".
-<center> 
-<img src="assets/overview.png" width="85%" height="auto">
-</center>
+This project is a copy of https://github.com/serena9525/AR-SSL4M
+. I am attempting to reproduce the results of this project for personal learning purposes. Please respect the original author's copyright and do not use this repo, use the original author's repo instead. This repo is only for version control and sharing with my friends.
+该项目是拷贝的https://github.com/serena9525/AR-SSL4M，我正在试图复现这个项目的成果用于个人学习目的。请尊重原作者的版权，不要使用这个repo，使用原作者的repo。这个repo仅用于版本管理以及共享给我的朋友们
 
 ### Requirements
 cuda==11.8<br />
@@ -57,5 +56,4 @@ Our implementation is based on the following codebases. We thank the authors for
 > [MONAI](https://github.com/Project-MONAI/MONAI)     
 > [MedMNIST](https://github.com/MedMNIST/experiments)   
 > [MedCoSS](https://github.com/yeerwen/MedCoSS)  
-## Contact
-If you have any questions, please feel free to [contact me](wangsiwendut@gmail.com).
+
