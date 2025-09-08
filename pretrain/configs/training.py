@@ -13,7 +13,7 @@ class train_config:
     gradient_clipping_threshold: float = 1.0
     num_epochs: int=5
     warmup_epochs:int=0
-    num_workers_dataloader: int=6
+    num_workers_dataloader: int=0
     lr: float=1e-4
     weight_decay: float=0.01
     gamma: float=0.1

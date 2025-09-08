@@ -259,9 +259,9 @@ class BaseModel(nn.Module):
         inputs_embeds = image_embeds + pos_embed[None, ...]
 
         if attention_mask is not None:
-            attention_mask = attention_mask.reshape(batch_size, 1, t * h * w + 2, t * h * w + 2)
+            attention_mask = attention_mask.reshape(batch_size, 1, t * h * w + 2, t * h * w + 2).float()
         else:
-            attention_mask = torch.ones(batch_size, 1, t * h * w + 2, t * h * w + 2, dtype=torch.bool).to(input_image.device)
+            attention_mask = torch.ones(batch_size, 1, t * h * w + 2, t * h * w + 2, dtype=torch.float32).to(input_image.device)
 
         attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
             attention_mask,
