@@ -32,3 +32,4 @@ class train_config:
     min_lr: float=0
     pos_type: str='sincos3d'
     norm_pixel_loss: bool=True
+    enable_profiling: bool=True
