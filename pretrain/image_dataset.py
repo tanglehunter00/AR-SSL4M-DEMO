@@ -63,7 +63,7 @@ class get_custom_dataset(Dataset):
         input_image = torch.tensor(input_image)
         
         # 对于空间序列，使用原始数据或进行子采样
-        if 'patch_random_spatial' in ann or 'RSNA_CSFD' in ann:
+        if 'patch_random_spatial' in ann or 'RSNA_CSFD' in ann or 'STOIC' in ann:
             # 对于单一空间数据，直接使用原始数据
             input_image = input_image.flatten()
         else:

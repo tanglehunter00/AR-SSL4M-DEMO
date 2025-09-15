@@ -7,9 +7,9 @@ class custom_dataset:
     file: str = "image_dataset.py"
     train_split: str = "train"
     test_split: str = "validation"
-    spatial_path: str = "demodata_list.txt"
-    contrast_path: str = "demodata_list.txt"
-    semantic_path: str = "demodata_list.txt"
+    spatial_path: str = "stoic_data_list.txt"
+    contrast_path: str = "stoic_data_list.txt"
+    semantic_path: str = "stoic_data_list.txt"
     img_size = [128, 128, 128]
     patch_size = [16, 16, 16]
     attention_type = 'prefix'
