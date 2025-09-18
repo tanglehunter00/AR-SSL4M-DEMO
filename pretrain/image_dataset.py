@@ -59,8 +59,13 @@ class get_custom_dataset(Dataset):
         ann = self.ann[index]
 
         # 加载预处理好的数据
-        input_image = np.load(ann)
-        input_image = torch.tensor(input_image)
+        try:
+            input_image = np.load(ann)
+            input_image = torch.tensor(input_image)
+        except Exception as e:
+            print(f"❌ ERROR loading file at index {index}: {ann}")
+            print(f"❌ Error: {str(e)}")
+            raise e
         
         # 对于空间序列，使用原始数据或进行子采样
         if 'patch_random_spatial' in ann or 'RSNA_CSFD' in ann or 'STOIC' in ann:

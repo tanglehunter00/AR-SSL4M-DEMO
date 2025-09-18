@@ -90,7 +90,27 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                 
                 # Data loading time
                 data_loading_start_time = time.perf_counter()
-                batch = next(dataloader_iter)
+                try:
+                    batch = next(dataloader_iter)
+                except Exception as e:
+                    print(f"\n❌ ERROR loading batch {step + 1}/{len(train_dataloader)}")
+                    print(f"❌ Error: {str(e)}")
+                    
+                    # 尝试获取当前batch的文件信息
+                    try:
+                        if hasattr(train_dataloader, 'batch_sampler'):
+                            batch_indices = list(train_dataloader.batch_sampler)[step]
+                            print(f"📋 Current batch indices: {batch_indices}")
+                            
+                            dataset = train_dataloader.dataset
+                            print(f"📁 Files in current batch:")
+                            for i, idx in enumerate(batch_indices):
+                                if idx < len(dataset.ann):
+                                    print(f"  {i+1}. Index {idx}: {dataset.ann[idx]}")
+                    except Exception as batch_info_error:
+                        print(f"⚠️ Could not get batch info: {batch_info_error}")
+                    
+                    raise e
                 data_loading_time = time.perf_counter() - data_loading_start_time
                 
                 # Learning rate scheduling
