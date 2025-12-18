@@ -11,9 +11,9 @@ class train_config:
     gradient_accumulation_steps: int=1
     gradient_clipping: bool=False
     gradient_clipping_threshold: float = 1.0
-    num_epochs: int=1
+    num_epochs: int=50
     warmup_epochs:int=0
-    num_workers_dataloader: int=0
+    num_workers_dataloader: int=6
     lr: float=1e-4
     weight_decay: float=0.01
     gamma: float=0.1
@@ -22,7 +22,7 @@ class train_config:
     mixed_precision: bool=False
     val_batch_size: int=1
     dataset = "custom_dataset"
-    output_dir: str="pretrain/save"
+    output_dir: str="PATH/to/save/model"
     freeze_layers: bool=False
     num_freeze_layers: int=1
     save_model: bool=True
@@ -32,4 +32,3 @@ class train_config:
     min_lr: float=0
     pos_type: str='sincos3d'
     norm_pixel_loss: bool=True
-    enable_profiling: bool=True

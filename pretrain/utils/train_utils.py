@@ -84,64 +84,21 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
             total_loss = 0.0
             total_length = len(train_dataloader)//gradient_accumulation_steps
             pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
-            dataloader_iter = iter(train_dataloader)
-            for step in range(len(train_dataloader)):
-                step_start_time = time.perf_counter()
-                
-                # Data loading time
-                data_loading_start_time = time.perf_counter()
-                try:
-                    batch = next(dataloader_iter)
-                except Exception as e:
-                    print(f"\n❌ ERROR loading batch {step + 1}/{len(train_dataloader)}")
-                    print(f"❌ Error: {str(e)}")
-                    
-                    # 尝试获取当前batch的文件信息
-                    try:
-                        if hasattr(train_dataloader, 'batch_sampler'):
-                            batch_indices = list(train_dataloader.batch_sampler)[step]
-                            print(f"📋 Current batch indices: {batch_indices}")
-                            
-                            dataset = train_dataloader.dataset
-                            print(f"📁 Files in current batch:")
-                            for i, idx in enumerate(batch_indices):
-                                if idx < len(dataset.ann):
-                                    print(f"  {i+1}. Index {idx}: {dataset.ann[idx]}")
-                    except Exception as batch_info_error:
-                        print(f"⚠️ Could not get batch info: {batch_info_error}")
-                    
-                    raise e
-                data_loading_time = time.perf_counter() - data_loading_start_time
-                
-                # Learning rate scheduling
-                lr_start_time = time.perf_counter()
+            for step, batch in enumerate(train_dataloader):
                 if train_config.scheduler == 'CosineLR':
                     lr = adjust_learning_rate(optimizer, step / len(train_dataloader) + epoch, train_config)
-                lr_time = time.perf_counter() - lr_start_time
-                
-                # Data transfer to GPU
-                data_transfer_start_time = time.perf_counter()
                 for key in batch.keys():
                     if train_config.enable_fsdp:
                         batch[key] = batch[key].to(local_rank)
                     else:
                         batch[key] = batch[key].to('cuda:0')
-                data_transfer_time = time.perf_counter() - data_transfer_start_time
-                
-                # Forward pass
-                forward_start_time = time.perf_counter()
                 with autocast():
                     # loss = model(**batch).loss
                     loss = model(**batch)[0]
                 loss = loss / gradient_accumulation_steps
-                forward_time = time.perf_counter() - forward_start_time
-                
                 if train_config.save_metrics:
                     train_step_loss.append(loss.detach().float().item())
                 total_loss += loss.detach().float()
-                
-                # Backward pass and optimization
-                backward_start_time = time.perf_counter()
                 if train_config.use_fp16:
                     # if fp16 is enabled, use gradient scaler to handle gradient update
                     scaler.scale(loss).backward()
@@ -168,25 +125,8 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                         optimizer.step()
                         optimizer.zero_grad()
                         pbar.update(1)
-                backward_time = time.perf_counter() - backward_start_time
-                
-                step_total_time = time.perf_counter() - step_start_time
-                
-                # 详细的时间统计输出
-                if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                    if not train_config.enable_fsdp or rank == 0:
-                        if hasattr(train_config, 'enable_profiling') and train_config.enable_profiling:
-                            time_info = (f"Step {step+1}/{len(train_dataloader)} | "
-                                       f"Loss: {loss.detach().float():.4f} | "
-                                       f"Total: {step_total_time:.3f}s | "
-                                       f"DataLoad: {data_loading_time:.3f}s | "
-                                       f"DataTransfer: {data_transfer_time:.3f}s | "
-                                       f"Forward: {forward_time:.3f}s | "
-                                       f"Backward: {backward_time:.3f}s | "
-                                       f"LR: {lr_time:.3f}s")
-                            print(time_info)
 
-                pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step+1}/{len(train_dataloader)} completed (loss: {loss.detach().float():.4f})")
+                pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
 
                 if train_config.save_metrics:
                     save_to_json(metrics_filename, train_step_loss, train_loss, val_step_loss, val_loss)
@@ -313,45 +253,22 @@ def evaluation(model,train_config, eval_dataloader, local_rank, split='val'):
     eval_loss = 0.0  # Initialize evaluation loss
 
     with MemoryTrace() as memtrace:
-        eval_pbar = tqdm(eval_dataloader, colour="green", desc="evaluating Epoch", dynamic_ncols=True)
-        for step, batch in enumerate(eval_pbar):
-            eval_step_start_time = time.perf_counter()
-            
-            # Data transfer to GPU
-            eval_data_transfer_start_time = time.perf_counter()
+        for step, batch in enumerate(tqdm(eval_dataloader,colour="green", desc="evaluating Epoch", dynamic_ncols=True)):
             for key in batch.keys():
                 if train_config.enable_fsdp:
                     batch[key] = batch[key].to(local_rank)
                 else:
                     batch[key] = batch[key].to('cuda:0')
-            eval_data_transfer_time = time.perf_counter() - eval_data_transfer_start_time
-            
             # Ensure no gradients are computed for this scope to save memory
             with torch.no_grad():
                 # Forward pass and compute loss
-                eval_forward_start_time = time.perf_counter()
                 outputs = model(**batch)
                 # loss = outputs.loss
                 loss = outputs[0]
-                eval_forward_time = time.perf_counter() - eval_forward_start_time
-                
                 if train_config.save_metrics:
                     val_step_loss.append(loss.detach().float().item())
 
                 eval_loss += loss.detach().float()
-                
-                eval_step_total_time = time.perf_counter() - eval_step_start_time
-                
-                # 验证阶段的时间统计输出
-                if step % 10 == 0 or step == len(eval_dataloader) - 1:  # 每10步或最后一步输出
-                    if not train_config.enable_fsdp or local_rank == 0:
-                        if hasattr(train_config, 'enable_profiling') and train_config.enable_profiling:
-                            eval_time_info = (f"Eval Step {step+1}/{len(eval_dataloader)} | "
-                                            f"Loss: {loss.detach().float():.4f} | "
-                                            f"Total: {eval_step_total_time:.3f}s | "
-                                            f"DataTransfer: {eval_data_transfer_time:.3f}s | "
-                                            f"Forward: {eval_forward_time:.3f}s")
-                            print(eval_time_info)
 
     # If there's more than one CUDA device, reduce evaluation loss across all devices
     if torch.cuda.device_count() > 1 and train_config.enable_fsdp:

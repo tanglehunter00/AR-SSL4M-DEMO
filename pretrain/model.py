@@ -8,45 +8,25 @@ from typing import Optional, Tuple, Union
 from torch import nn
 
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask_for_sdpa
-import math
 
 
 class SinCosPosEmbed(nn.Module):
-    """
-    3D正弦余弦位置编码类
-    
-    作用：为3D医学图像中的每个位置（时间、高度、宽度）生成位置编码
-    原理：使用正弦和余弦函数为不同位置生成独特的编码，帮助模型理解空间位置关系
-    
-    参数说明：
-    - t: 时间维度大小（3D图像的第1维）
-    - h: 高度维度大小（3D图像的第2维）  
-    - w: 宽度维度大小（3D图像的第3维）
-    - embed_dim: 嵌入维度大小（通常是768）
-    """
     def __init__(self):
         super().__init__()
 
     def forward(self, t: int, h: int, w: int, embed_dim: int) -> torch.Tensor:
-        # 确保嵌入维度能被3整除，因为我们要分别处理t、h、w三个维度
         assert embed_dim % 3 == 0, embed_dim
-        
-        # 创建时间、高度、宽度的网格坐标
-        grid_t = torch.arange(t).float()  # [0, 1, 2, ..., t-1]
-        grid_h = torch.arange(h).float()  # [0, 1, 2, ..., h-1]
-        grid_w = torch.arange(w).float()  # [0, 1, 2, ..., w-1]
+        grid_t = torch.arange(t).float()
+        grid_h = torch.arange(h).float()
+        grid_w = torch.arange(w).float()
 
-        # 创建3D网格：每个位置都有(t, h, w)坐标
         grid = torch.meshgrid(grid_t, grid_h, grid_w)
-        grid = torch.stack(grid, dim=0)  # 形状：[3, t, h, w]
-        grid = grid.reshape([3, 1, t, h, w])  # 重新整形为：[3, 1, t, h, w]
+        grid = torch.stack(grid, dim=0)
+        grid = grid.reshape([3, 1, t, h, w])
 
-        # 为每个维度生成位置编码
-        emb_t = self._get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[0])  # 时间维度编码
-        emb_h = self._get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[1])  # 高度维度编码
-        emb_w = self._get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[2])  # 宽度维度编码
-        
-        # 将三个维度的编码拼接起来
+        emb_t = self._get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[0])
+        emb_h = self._get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[1])
+        emb_w = self._get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[2])
         pos_embed = torch.concatenate([emb_t, emb_h, emb_w], dim=1)
 
         return pos_embed
@@ -55,45 +35,21 @@ class SinCosPosEmbed(nn.Module):
     def _get_1d_sincos_pos_embed_from_grid(
         embed_dim: int, pos: torch.Tensor
     ) -> torch.Tensor:
-        """
-        为1D位置生成正弦余弦编码
-        
-        参数：
-        - embed_dim: 编码维度大小
-        - pos: 位置坐标张量
-        
-        返回：位置编码张量
-        """
-        # 创建频率序列：从低频到高频
         omega = torch.arange(embed_dim // 2).float()
         omega /= embed_dim / 2.0
-        omega = 1.0 / 10000**omega  # 频率：[1, 1/10000^(1/D), 1/10000^(2/D), ...]
+        omega = 1.0 / 10000**omega  # (D/2,)
 
-        pos = pos.reshape(-1)  # 将位置坐标展平
-        out = torch.einsum("m,d->md", pos, omega)  # 位置与频率的外积
+        pos = pos.reshape(-1)  # (M,)
+        out = torch.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
 
-        # 生成正弦和余弦编码
-        emb_sin = torch.sin(out)  # 正弦部分
-        emb_cos = torch.cos(out)  # 余弦部分
-        
-        # 拼接正弦和余弦编码
-        emb = torch.concatenate([emb_sin, emb_cos], dim=1)  # 形状：[M, embed_dim]
+        emb_sin = torch.sin(out)  # (M, D/2)
+        emb_cos = torch.cos(out)  # (M, D/2)
+
+        emb = torch.concatenate([emb_sin, emb_cos], dim=1)  # (M, D)
         return emb
 
 
 class PatchEmbed(nn.Module):
-    """
-    3D图像块嵌入类
-    
-    作用：将3D医学图像分割成小块（patches），然后将每个块转换为向量表示
-    原理：使用3D卷积将图像分成固定大小的块，每个块变成一个向量
-    
-    参数说明：
-    - img_size: 输入图像大小，如(128, 128, 128)表示128×128×128的3D图像
-    - patch_size: 块大小，如(16, 16, 16)表示16×16×16的块
-    - in_chans: 输入通道数，医学图像通常是1（灰度）
-    - embed_dim: 嵌入维度，每个块转换成的向量长度
-    """
     def __init__(
         self,
         img_size: Union[int, Tuple[int, int, int]] = 64,
@@ -102,8 +58,6 @@ class PatchEmbed(nn.Module):
         embed_dim: int = 768,
     ):
         super().__init__()
-        
-        # 处理输入参数：如果是单个数字，转换为3D元组
         img_size = (
             (img_size, img_size, img_size) if isinstance(img_size, int) else tuple(img_size)
         )
@@ -113,76 +67,44 @@ class PatchEmbed(nn.Module):
             else tuple(patch_size)
         )
 
-        # 保存重要参数
         self.img_size, self.embed_dim = img_size, embed_dim
         self.patch_size = patch_size
-        
-        # 计算网格大小：图像被分成多少块
         self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1], img_size[2] // patch_size[2])
         self.num_patches = self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
-        
-        # 3D卷积层：将图像块转换为向量
         self.proj = nn.Conv3d(
             in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
         )
 
     def patchify(self, x):
-        """
-        将图像重新排列为块序列（用于计算损失）
-        
-        参数：
-        - x: 输入图像张量
-        
-        返回：重新排列的块张量
-        """
-        pt, ph, pw = self.patch_size  # 块大小
-        t, h, w = self.grid_size      # 网格大小
-        
-        # 重新整形图像为块序列
+        pt, ph, pw = self.patch_size
+        t, h, w = self.grid_size
         x = x.reshape(shape=(x.shape[0], 1, t, pt, h, ph, w, pw))
         x = torch.einsum('nctphqwr->nthwpqrc', x)
         x = x.reshape(shape=(x.shape[0], t * h * w, pt * ph * pw * 1))
         return x
 
     def forward(self, x: torch.Tensor):
-        """
-        前向传播：将3D图像转换为块嵌入
-        
-        参数：
-        - x: 输入3D图像，形状为[batch_size, channels, depth, height, width]
-        
-        返回：块嵌入，形状为[batch_size, num_patches, embed_dim]
-        """
-        # 使用3D卷积将图像转换为块嵌入
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
 
-class DilatedAttention(nn.Module):
-    """
-    膨胀注意力机制类
-    
-    作用：实现D-Former中的膨胀注意力，通过空洞机制扩大感受野
-    原理：在全局自注意力计算中采用空洞方式，减少计算量同时保持长距离依赖
-    """
-    def __init__(self, config, layer_idx: Optional[int] = None, dilation_rate: int = 2):
+class Attention(nn.Module):
+
+    def __init__(self, config, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.dilation_rate = dilation_rate
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
 
-        # 检查隐藏层大小是否能被头数整除
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        # 定义线性变换层
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
@@ -193,275 +115,53 @@ class DilatedAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ):
-        """
-        前向传播：计算膨胀多头自注意力
-        
-        参数：
-        - hidden_states: 输入隐藏状态，形状为[batch_size, seq_len, hidden_size]
-        - attention_mask: 注意力掩码，用于屏蔽某些位置
-        
-        返回：膨胀注意力输出，形状为[batch_size, seq_len, hidden_size]
-        """
+
         bsz, q_len, _ = hidden_states.size()
 
-        # 计算查询、键、值
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        # 重新整形为多头格式
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
 
-        # 应用膨胀机制：每隔dilation_rate个位置计算注意力
-        if self.dilation_rate > 1:
-            # 对query进行膨胀采样
-            dilated_query_indices = torch.arange(0, q_len, self.dilation_rate, device=query_states.device)
-            query_states = query_states[:, :, dilated_query_indices, :]
-            
-            # 对key和value进行膨胀采样
-            dilated_kv_indices = torch.arange(0, kv_seq_len, self.dilation_rate, device=key_states.device)
-            key_states = key_states[:, :, dilated_kv_indices, :]
-            value_states = value_states[:, :, dilated_kv_indices, :]
-
-        # 处理注意力掩码
-        if attention_mask is not None:
-            # 调整掩码以适应膨胀后的序列长度
-            if self.dilation_rate > 1:
-                dilated_mask_indices_q = torch.arange(0, attention_mask.size(-2), self.dilation_rate, device=attention_mask.device)
-                dilated_mask_indices_kv = torch.arange(0, attention_mask.size(-1), self.dilation_rate, device=attention_mask.device)
-                attention_mask = attention_mask[:, :, dilated_mask_indices_q, :]
-                attention_mask = attention_mask[:, :, :, dilated_mask_indices_kv]
-            
-            if attention_mask.size() != (bsz, 1, query_states.size(-2), key_states.size(-2)):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, query_states.size(-2), key_states.size(-2))}, but is {attention_mask.size()}"
-                )
-
-        # 确保张量在GPU上是连续的
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        # 计算缩放点积注意力
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0,
-            is_causal=attention_mask is None and q_len > 1,
-        )
-
-        # 重新整形并应用输出投影
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        
-        # 如果使用了膨胀，需要将输出插值回原始长度
-        if self.dilation_rate > 1:
-            # 创建完整的输出张量
-            full_output = torch.zeros(bsz, q_len, self.hidden_size, device=attn_output.device, dtype=attn_output.dtype)
-            dilated_indices = torch.arange(0, q_len, self.dilation_rate, device=attn_output.device)
-            full_output[:, dilated_indices, :] = attn_output.reshape(bsz, -1, self.hidden_size)
-            attn_output = full_output
-        else:
-            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-        
-        attn_output = self.o_proj(attn_output)
-        return attn_output
-
-
-class ResidualGating(nn.Module):
-    """
-    残差门控机制类（固定超参数版本）
-    
-    作用：控制原始注意力和膨胀注意力的权重比例
-    原理：使用固定的超参数来强制约束两种注意力机制的权重比例
-    
-    参数说明：
-    - hidden_size: 隐藏层大小
-    - task_type: 任务类型（"pretrain"或"finetune"）
-    - pretrain_dilated_ratio: 上游预训练任务中膨胀注意力的权重比例（默认0.01）
-    - finetune_dilated_ratio: 下游微调任务中膨胀注意力的权重比例（默认0.01）
-    """
-    def __init__(self, hidden_size: int, task_type: str = "pretrain", 
-                 pretrain_dilated_ratio: float = 0.01, finetune_dilated_ratio: float = 0.01):
-        super().__init__()
-        self.task_type = task_type
-        
-        # 为不同任务设置固定的门控系数
-        if task_type == "pretrain":
-            # 上游预训练任务：使用固定超参数
-            self.dilated_ratio = pretrain_dilated_ratio
-            self.original_ratio = 1.0 - pretrain_dilated_ratio
-        else:
-            # 下游微调任务：使用固定超参数
-            self.dilated_ratio = finetune_dilated_ratio
-            self.original_ratio = 1.0 - finetune_dilated_ratio
-        
-        # 注册为buffer，这样不会参与梯度计算
-        self.register_buffer('dilated_weight', torch.tensor(self.dilated_ratio))
-        self.register_buffer('original_weight', torch.tensor(self.original_ratio))
-    
-    def forward(self, original_attention: torch.Tensor, dilated_attention: torch.Tensor):
-        """
-        前向传播：计算门控后的注意力输出
-        
-        参数：
-        - original_attention: 原始注意力输出
-        - dilated_attention: 膨胀注意力输出
-        
-        返回：门控后的注意力输出
-        """
-        # 使用固定的权重比例进行加权融合
-        gated_output = self.dilated_weight * dilated_attention + self.original_weight * original_attention
-        
-        return gated_output
-
-
-class Attention(nn.Module):
-    """
-    多头自注意力机制类（支持膨胀注意力）
-    
-    作用：让模型能够关注输入序列中的不同部分，理解它们之间的关系
-    原理：通过计算查询(Q)、键(K)、值(V)之间的相似度来决定关注哪些位置
-    新增：集成膨胀注意力机制和残差门控
-    
-    参数说明：
-    - config: 模型配置，包含隐藏层大小、注意力头数等
-    - layer_idx: 当前层在模型中的索引
-    - task_type: 任务类型（"pretrain"或"finetune"）
-    - use_dilated: 是否使用膨胀注意力
-    """
-
-    def __init__(self, config, layer_idx: Optional[int] = None, task_type: str = "pretrain", 
-                 use_dilated: bool = True, pretrain_dilated_ratio: float = 0.01, finetune_dilated_ratio: float = 0.01):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.task_type = task_type
-        self.use_dilated = use_dilated
-        self.hidden_size = config.hidden_size  # 隐藏层大小，通常是768
-        self.num_heads = config.num_attention_heads  # 注意力头数，通常是12
-        self.head_dim = self.hidden_size // self.num_heads  # 每个头的维度，768/12=64
-        self.num_key_value_heads = config.num_key_value_heads  # 键值头数
-
-        # 检查隐藏层大小是否能被头数整除
-        if (self.head_dim * self.num_heads) != self.hidden_size:
-            raise ValueError(
-                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads})."
-            )
-
-        # 定义线性变换层
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)  # 查询投影
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)  # 键投影
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)  # 值投影
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, True)  # 输出投影
-        
-        # 如果使用膨胀注意力，添加膨胀注意力层和残差门控
-        if self.use_dilated:
-            self.dilated_attention = DilatedAttention(config, layer_idx, dilation_rate=2)
-            self.residual_gating = ResidualGating(
-                self.hidden_size, 
-                task_type, 
-                pretrain_dilated_ratio=pretrain_dilated_ratio,
-                finetune_dilated_ratio=finetune_dilated_ratio
-            )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ):
-        """
-        前向传播：计算多头自注意力（支持膨胀注意力）
-        
-        参数：
-        - hidden_states: 输入隐藏状态，形状为[batch_size, seq_len, hidden_size]
-        - attention_mask: 注意力掩码，用于屏蔽某些位置
-        
-        返回：注意力输出，形状为[batch_size, seq_len, hidden_size]
-        """
-
-        bsz, q_len, _ = hidden_states.size()  # batch_size, query_length, hidden_size
-
-        # 计算查询、键、值
-        query_states = self.q_proj(hidden_states)  # 查询
-        key_states = self.k_proj(hidden_states)    # 键
-        value_states = self.v_proj(hidden_states)  # 值
-
-        # 重新整形为多头格式
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        kv_seq_len = key_states.shape[-2]
-
-        # 处理注意力掩码
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
 
-        # 确保张量在GPU上是连续的（性能优化）
+        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+        # Reference: https://github.com/pytorch/pytorch/issues/112577.
         if query_states.device.type == "cuda" and attention_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        # 计算缩放点积注意力
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0,
+            # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
             is_causal=attention_mask is None and q_len > 1,
         )
 
-        # 重新整形并应用输出投影
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-        original_attn_output = self.o_proj(attn_output)
-        
-        # 如果使用膨胀注意力，计算膨胀注意力并应用残差门控
-        if self.use_dilated:
-            dilated_attn_output = self.dilated_attention(hidden_states, attention_mask)
-            final_output = self.residual_gating(original_attn_output, dilated_attn_output)
-            return final_output
-        else:
-            return original_attn_output
+        attn_output = self.o_proj(attn_output)
+        return attn_output
 
 
 class DecoderLayer(nn.Module):
-    """
-    Transformer解码器层类（支持膨胀注意力）
-    
-    作用：构成Transformer模型的基本单元，包含自注意力机制和前馈网络
-    原理：通过残差连接和层归一化，让信息在层间流动
-    新增：支持膨胀注意力和残差门控
-    
-    参数说明：
-    - config: 模型配置
-    - layer_idx: 当前层索引
-    - task_type: 任务类型（"pretrain"或"finetune"）
-    - use_dilated: 是否使用膨胀注意力
-    """
-    def __init__(self, config, layer_idx: int, task_type: str = "pretrain", use_dilated: bool = True,
-                 pretrain_dilated_ratio: float = 0.01, finetune_dilated_ratio: float = 0.01):
+    def __init__(self, config, layer_idx: int):
         super().__init__()
 
         self.hidden_size = config.hidden_size
-        self.task_type = task_type
-        self.use_dilated = use_dilated
-        self.self_attn = Attention(
-            config=config, 
-            layer_idx=layer_idx, 
-            task_type=task_type, 
-            use_dilated=use_dilated,
-            pretrain_dilated_ratio=pretrain_dilated_ratio,
-            finetune_dilated_ratio=finetune_dilated_ratio
-        )  # 自注意力层
-        self.mlp = MLPBlock(config.hidden_size, config.intermediate_size, 0.0)  # 前馈网络
-        self.input_layernorm = nn.LayerNorm(config.hidden_size)  # 输入层归一化
-        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size)  # 注意力后层归一化
+        self.self_attn = Attention(config=config, layer_idx=layer_idx)
+        self.mlp = MLPBlock(config.hidden_size, config.intermediate_size, 0.0)
+        self.input_layernorm = nn.LayerNorm(config.hidden_size)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size)
 
     def forward(
         self,
@@ -469,102 +169,67 @@ class DecoderLayer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        """
-        前向传播：执行一个Transformer层
-        
-        参数：
-        - hidden_states: 输入隐藏状态
-        - attention_mask: 注意力掩码
-        
-        返回：输出隐藏状态
-        """
 
-        # 自注意力子层（带残差连接）
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)  # 层归一化
+        hidden_states = self.input_layernorm(hidden_states)
 
-        # 自注意力
+        # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             **kwargs,
         )
-        hidden_states = residual + hidden_states  # 残差连接
+        hidden_states = residual + hidden_states
 
-        # 前馈网络子层（带残差连接）
+        # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)  # 层归一化
-        hidden_states = self.mlp(hidden_states)  # 前馈网络
-        hidden_states = residual + hidden_states  # 残差连接
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
         return outputs
 
 
 class BaseModel(nn.Module):
-    """
-    基础Transformer模型类（支持膨胀注意力）
-    
-    作用：实现完整的Transformer架构，包含patch嵌入、位置编码、多层Transformer
-    原理：将3D医学图像转换为序列，通过Transformer处理序列信息
-    新增：支持膨胀注意力和残差门控
-    
-    参数说明：
-    - config: 模型配置，包含所有超参数
-    - task_type: 任务类型（"pretrain"或"finetune"）
-    - use_dilated: 是否使用膨胀注意力
-    """
 
-    def __init__(self, config, task_type: str = "pretrain", use_dilated: bool = True,
-                 pretrain_dilated_ratio: float = 0.01, finetune_dilated_ratio: float = 0.01):
+    def __init__(self, config):
         super().__init__()
-        self.pos_type = config.pos_type  # 位置编码类型：'sincos3d'或'learnable'
-        self.img_size = config.img_size  # 图像大小，如[128, 128, 128]
-        self.patch_size = config.patch_size  # 块大小，如[16, 16, 16]
-        self.task_type = task_type
-        self.use_dilated = use_dilated
-        
-        # 特殊token嵌入：开始token(1)、图像token(3)、结束token(2)
+        self.pos_type = config.pos_type
+        self.img_size = config.img_size
+        self.patch_size = config.patch_size
         self.embed_tokens = nn.Embedding(4, config.hidden_size)
-        
-        # Patch嵌入层：将图像块转换为向量
         self.patchifier = PatchEmbed(embed_dim=config.hidden_size,
                                      img_size=(self.img_size[0], self.img_size[1], self.img_size[2]),
                                      patch_size=(self.patch_size[0], self.patch_size[1], self.patch_size[2]))
-        
-        # 位置编码
         if self.pos_type == 'sincos3d':
-            self.pos_embed = SinCosPosEmbed()  # 正弦余弦位置编码
+            self.pos_embed = SinCosPosEmbed()
         elif self.pos_type == 'learnable':
-            # 可学习位置编码：每个位置都有一个可学习的向量
             self.pos_embed_learn = nn.Parameter(torch.zeros(self.img_size[0] * self.img_size[1] * self.img_size[2] //
                                                             self.patch_size[0] // self.patch_size[1] // self.patch_size[2] + 2, config.hidden_size))
             trunc_normal_(self.pos_embed_learn, std=.02)
 
-        # Transformer层：多层解码器（支持膨胀注意力）
         self.layers = nn.ModuleList(
-            [DecoderLayer(config, layer_idx, task_type, use_dilated, pretrain_dilated_ratio, finetune_dilated_ratio) 
-             for layer_idx in range(config.num_hidden_layers)]
+            [DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = nn.LayerNorm(config.hidden_size)  # 最终层归一化
-        self.init_proj()  # 初始化投影层
-        self.apply(self._init_weights)  # 初始化所有权重
+        self.norm = nn.LayerNorm(config.hidden_size)
+        self.init_proj()
+        self.apply(self._init_weights)
 
     def init_proj(self):
-        """初始化patch嵌入的投影层权重"""
         if hasattr(self.patchifier, "proj"):
             w = self.patchifier.proj.weight.data
             nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
     def _init_weights(self, m):
-        """初始化模型权重"""
         if isinstance(m, nn.Linear):
-            nn.init.xavier_uniform_(m.weight)  # Xavier初始化
+            # trunc_normal_(m.weight, std=.02)
+            nn.init.xavier_uniform_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)  # 偏置初始化为0
+                nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)  # 层归一化偏置为0
-            nn.init.constant_(m.weight, 1.0)  # 层归一化权重为1
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
     def forward(
         self,
@@ -573,56 +238,31 @@ class BaseModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
     ):
-        """
-        前向传播：处理输入图像和token
-        
-        参数：
-        - input_ids: 特殊token的ID序列，如[1, 3, 3, ..., 3, 2]
-        - input_image: 输入3D图像
-        - attention_mask: 注意力掩码
-        - output_hidden_states: 是否输出中间隐藏状态
-        
-        返回：最终的隐藏状态
-        """
 
         batch_size, seq_length = input_ids.shape[:2]
         past_key_values_length = 0
-        
-        # 将图像重塑为正确格式
         input_image = input_image.reshape(batch_size, 1, self.img_size[0], self.img_size[1], self.img_size[2])
-        
-        # 将图像转换为patch嵌入
         image_embeds = self.patchifier(input_image)
-        t, h, w = self.patchifier.grid_size  # 网格大小
+        t, h, w = self.patchifier.grid_size
         embed_dim = self.patchifier.embed_dim
 
-        # 获取特殊token的嵌入
-        starts_embeds = self.embed_tokens(input_ids[...,:1])  # 开始token嵌入
-        ends_embeds = self.embed_tokens(input_ids[...,-1:])   # 结束token嵌入
-        
-        # 拼接：开始token + 图像patches + 结束token
+        starts_embeds = self.embed_tokens(input_ids[...,:1])
+        ends_embeds = self.embed_tokens(input_ids[...,-1:])
         image_embeds = torch.cat((starts_embeds, image_embeds, ends_embeds), 1)
-        
-        # 添加位置编码
         if self.pos_type == 'sincos3d':
             pos_embed = self.pos_embed(t, h, w, embed_dim)
-            # 为开始和结束token添加零位置编码
             pos_embed = torch.concatenate([torch.zeros([1, embed_dim]), pos_embed], dim=0)
             pos_embed = torch.concatenate([pos_embed, torch.zeros([1, embed_dim])], dim=0)
         elif self.pos_type == 'learnable':
             pos_embed = self.pos_embed_learn
-        
         pos_embed = pos_embed.to(image_embeds.device)
-        inputs_embeds = image_embeds + pos_embed[None, ...]  # 添加位置编码
+        inputs_embeds = image_embeds + pos_embed[None, ...]
 
-        # 处理注意力掩码
         if attention_mask is not None:
-            attention_mask = attention_mask.reshape(batch_size, 1, t * h * w + 2, t * h * w + 2).float()
+            attention_mask = attention_mask.reshape(batch_size, 1, t * h * w + 2, t * h * w + 2)
         else:
-            # 创建全1的注意力掩码（所有位置都可以互相注意）
-            attention_mask = torch.ones(batch_size, 1, t * h * w + 2, t * h * w + 2, dtype=torch.float32).to(input_image.device)
+            attention_mask = torch.ones(batch_size, 1, t * h * w + 2, t * h * w + 2, dtype=torch.bool).to(input_image.device)
 
-        # 准备4D因果注意力掩码
         attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
             attention_mask,
             (batch_size, seq_length),
@@ -630,10 +270,10 @@ class BaseModel(nn.Module):
             past_key_values_length,
         )
 
-        # 开始Transformer处理
+        # embed positions
         hidden_states = inputs_embeds
 
-        # 通过所有Transformer层
+        # decoder layers
         all_hidden_states = () if output_hidden_states else None
 
         for decoder_layer in self.layers:
@@ -645,40 +285,22 @@ class BaseModel(nn.Module):
             )
             hidden_states = layer_outputs[0]
 
-        # 最终层归一化
         hidden_states = self.norm(hidden_states)
 
-        # 添加最后一层的隐藏状态
+        # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
         return tuple(v for v in [hidden_states])
 
 
 class ReconModel(nn.Module):
-    """
-    重建模型类（主要的预训练模型，支持膨胀注意力）
-    
-    作用：实现自监督学习，通过预测被遮挡的图像块来学习图像表示
-    原理：输入部分图像，预测完整的图像，从而学习图像的内在结构
-    新增：支持膨胀注意力和残差门控
-    
-    参数说明：
-    - config: 模型配置
-    - task_type: 任务类型（"pretrain"或"finetune"）
-    - use_dilated: 是否使用膨胀注意力
-    """
-    def __init__(self, config, task_type: str = "pretrain", use_dilated: bool = True,
-                 pretrain_dilated_ratio: float = 0.01, finetune_dilated_ratio: float = 0.01):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.task_type = task_type
-        self.use_dilated = use_dilated
-        self.model = BaseModel(config, task_type, use_dilated, pretrain_dilated_ratio, finetune_dilated_ratio)  # 基础Transformer模型
+        self.model = BaseModel(config)
         self.patch_size = self.model.patchifier.patch_size
-        self.norm_pixel_loss = config.norm_pixel_loss  # 是否使用像素归一化损失
+        self.norm_pixel_loss = config.norm_pixel_loss
         self.img_size = config.img_size
-        
-        # 重建头：将隐藏状态转换为像素值
         self.decoder_pred = nn.Linear(config.hidden_size, self.patch_size[0] * self.patch_size[1] * self.patch_size[2], bias=True)
 
     def forward(
@@ -689,20 +311,8 @@ class ReconModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
     ):
-        """
-        前向传播：执行图像重建任务
-        
-        参数：
-        - input_ids: 特殊token序列
-        - input_image: 输入图像
-        - prefix_mask: 前缀掩码，指示哪些位置需要预测
-        - attention_mask: 注意力掩码
-        - output_hidden_states: 是否输出隐藏状态
-        
-        返回：(损失, 预测结果)
-        """
 
-        # 通过基础模型获取隐藏状态
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
             input_image=input_image,
@@ -711,32 +321,26 @@ class ReconModel(nn.Module):
         )
 
         hidden_states = outputs[0]
-        
-        # 通过重建头预测像素值
         logits = self.decoder_pred(hidden_states)
         logits = logits.float()
         loss = None
 
-        # 准备预测目标：移除开始和结束token对应的位置
         shift_logits = logits[..., :-2, :].contiguous()
         input_image = input_image.reshape(input_image.shape[0], 1, self.img_size[0], self.img_size[1], self.img_size[2])
         shift_labels = self.model.patchifier.patchify(input_image)
 
-        # 处理前缀掩码：只对需要预测的位置计算损失
         prefix_mask = prefix_mask[..., 1:-1, None]
         prefix_mask = prefix_mask.repeat_interleave(shift_labels.shape[-1], axis=-1)
 
-        # 像素归一化（可选）：标准化像素值
         if self.norm_pixel_loss:
             mean = shift_labels.mean(dim=-1, keepdim=True)
             var = shift_labels.var(dim=-1, keepdim=True)
             shift_labels = (shift_labels - mean) / (var + 1.e-6) ** .5
 
-        # 计算重建损失：预测值与真实值的均方误差
         shift_labels = shift_labels.to(shift_logits.device)
         loss = (shift_logits - shift_labels) ** 2
-        loss = loss[prefix_mask > 0]  # 只计算需要预测的位置
-        loss = loss.mean()  # 平均损失
+        loss = loss[prefix_mask > 0]
+        loss = loss.mean()  # [N, L], mean loss per patch
 
         output = (logits,)
         return (loss,) + output if loss is not None else output

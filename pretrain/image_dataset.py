@@ -58,21 +58,16 @@ class get_custom_dataset(Dataset):
     def __getitem__(self, index):
         ann = self.ann[index]
 
-        # 加载预处理好的数据
-        try:
+        if 'patch_random_spatial' in ann:
             input_image = np.load(ann)
+            start, stride = random.randint(0, 63), 8
+            z_size = self.img_size[2] // self.series_length
             input_image = torch.tensor(input_image)
-        except Exception as e:
-            print(f"❌ ERROR loading file at index {index}: {ann}")
-            print(f"❌ Error: {str(e)}")
-            raise e
-        
-        # 对于空间序列，使用原始数据或进行子采样
-        if 'patch_random_spatial' in ann or 'RSNA_CSFD' in ann or 'STOIC' in ann:
-            # 对于单一空间数据，直接使用原始数据
-            input_image = input_image.flatten()
+            input_image = torch.cat((input_image[..., start: start + z_size],
+                                     input_image[..., start + stride: start + stride + z_size],
+                                     input_image[..., start + 2 * stride: start + 2 * stride + z_size],
+                                     input_image[..., start + 3 * stride: start + 3 * stride + z_size]), dim=-1).flatten()
         else:
-            # 处理其他类型的数据（多序列）
             ann_split_list = ann.split(',')
             for split_id, ann_split in enumerate(ann_split_list):
                 input_image_single = np.load(ann_split)
@@ -84,7 +79,7 @@ class get_custom_dataset(Dataset):
             input_image = input_image.flatten()
 
         input_ids = torch.tensor([1] + [3] * self.grid_length + [2], dtype=torch.int64)
-        attention_mask = torch.ones(self.grid_length + 2, self.grid_length + 2, dtype=torch.float32).tril(diagonal=0)
+        attention_mask = torch.ones(self.grid_length + 2, self.grid_length + 2, dtype=torch.bool).tril(diagonal=0)
         if self.attention_type == 'prefix':
             prefix_length = random.randint(0, self.grid_length - 1)
         elif self.attention_type == 'causal':
