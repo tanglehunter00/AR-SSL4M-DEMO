@@ -9,6 +9,46 @@ from torch import nn
 
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask_for_sdpa
 
+GeoPriorGen3DOn = 0 # 0: 不使用3D几何先验，1: 使用3D几何先验
+
+
+############################################################################################################
+# 此处进行了修改，新增了3D几何先验生成器
+############################################################################################################
+class GeoPriorGen3D(nn.Module):
+    def __init__(self, num_heads, initial_value=2, heads_range=4):
+        super().__init__()
+        # decay calculation based on DFormerV2
+        # decay is a negative value: log(1 - 2^(-x)) < 0
+        decay = torch.log(
+            1 - 2 ** (-initial_value - heads_range * torch.arange(num_heads, dtype=torch.float) / num_heads)
+        )
+        self.register_buffer("decay", decay)
+
+    def forward(self, t: int, h: int, w: int):
+        # Generate 3D Grid
+        idx_t = torch.arange(t).to(self.decay.device)
+        idx_h = torch.arange(h).to(self.decay.device)
+        idx_w = torch.arange(w).to(self.decay.device)
+        
+        # (t, h, w, 3)
+        grid = torch.meshgrid([idx_t, idx_h, idx_w], indexing='ij')
+        grid = torch.stack(grid, dim=-1).reshape(t * h * w, 3) # (N, 3)
+        
+        # Calculate 3D Relative Manhattan Distance
+        # (N, 1, 3) - (1, N, 3) -> (N, N, 3)
+        dist = grid[:, None, :] - grid[None, :, :]
+        dist = dist.abs().sum(dim=-1) # (N, N)
+        
+        # Apply decay
+        # self.decay: (NumHeads,)
+        # dist: (N, N)
+        # result: (NumHeads, N, N)
+        # Since decay is negative, larger distance -> more negative bias
+        bias = dist.unsqueeze(0) * self.decay[:, None, None]
+        
+        return bias
+
 
 class SinCosPosEmbed(nn.Module):
     def __init__(self):
@@ -130,9 +170,25 @@ class Attention(nn.Module):
 
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
+                ##########################################################################################################
+                # 此处进行了修改，修改报错信息，不重要
+                ##########################################################################################################
+                #raise ValueError(
+                #    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                #)
+                if GeoPriorGen3DOn == 1:
+                    if attention_mask.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+                        raise ValueError(
+                            f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)} or {(bsz, self.num_heads, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                        )
+                else:
+                    # 原报错信息在这里是不做进一步校验的，也就是说原报错更容易触发，新报错更不容易触发
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                ##########################################################################################################
+                # 此处进行了修改，修改止步于此
+                ##########################################################################################################
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -214,6 +270,15 @@ class BaseModel(nn.Module):
         )
         self.norm = nn.LayerNorm(config.hidden_size)
         self.init_proj()
+        ##########################################################################################################
+        # 此处进行了修改，初始化3D几何先验生成器
+        ##########################################################################################################
+        # Init Geometry Prior Generator
+        if GeoPriorGen3DOn == 1:
+            self.geo_prior_gen = GeoPriorGen3D(config.num_attention_heads)
+        ##########################################################################################################
+        # 修改止步于此
+        ##########################################################################################################
         self.apply(self._init_weights)
 
     def init_proj(self):
@@ -283,6 +348,35 @@ class BaseModel(nn.Module):
             inputs_embeds,
             past_key_values_length,
         )
+        ##########################################################################################################
+        # 此处进行了修改，不知道改的什么
+        ##########################################################################################################
+        # --- 应用 3D 几何先验 Bias ---
+        if GeoPriorGen3DOn == 1:
+            # 生成 3D 几何先验 Bias，形状为 (NumHeads, N, N)，其中 N = t*h*w 是 Patch 的总数
+            geo_bias = self.geo_prior_gen(t, h, w)
+        
+            # 对 Bias 进行填充以匹配序列长度 (N+2)
+            # 序列包含 [StartToken, Patch_1, ..., Patch_N, EndToken]
+            # 我们只将几何衰减应用于 Patch-to-Patch 的注意力上，不影响特殊 Token
+            full_geo_bias = torch.zeros(
+                (geo_bias.shape[0], seq_length, seq_length),
+                dtype=inputs_embeds.dtype,
+                device=attention_mask.device
+            )
+            # 将生成的几何 Bias 填充到中间的 Patch 区域 [1:-1, 1:-1]
+            full_geo_bias[:, 1:-1, 1:-1] = geo_bias
+        
+            # 将几何 Bias 加到现有的 Attention Mask 上
+            # attention_mask 形状: (Batch, 1, SeqLen, SeqLen) - 包含了因果/前缀掩码
+            # full_geo_bias 形状: (NumHeads, SeqLen, SeqLen) - 包含了距离衰减偏置
+            # 利用广播机制合并: (Batch, NumHeads, SeqLen, SeqLen)
+            # 最终效果：保留了原有的可见性约束(Mask)，同时为可见区域加上了随距离衰减的权重 Bias
+            attention_mask = attention_mask + full_geo_bias.unsqueeze(0)
+            # ------------------------------------
+        ##########################################################################################################
+        # 修改止步于此
+        ##########################################################################################################
 
         # embed positions
         hidden_states = inputs_embeds
