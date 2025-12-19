@@ -232,8 +232,12 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
     if train_config.enable_fsdp:
         save_train_params(train_config, fsdp_config, rank)
 
-    return results
+    ##########################################################################################################
+    # 此处进行了修改，打印所有epoch的训练损失
+    ##########################################################################################################
+    print(f"\nTraining completed! All epoch train losses: {train_loss}")
 
+    return results
 
 def evaluation(model,train_config, eval_dataloader, local_rank, split='val'):
     """
