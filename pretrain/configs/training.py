@@ -6,7 +6,7 @@ class train_config:
     enable_fsdp: bool=False
     low_cpu_fsdp: bool=False
     run_validation: bool=True
-    batch_size_training: int=4
+    batch_size_training: int=24
     batching_strategy: str="padding"
     gradient_accumulation_steps: int=1
     gradient_clipping: bool=False
