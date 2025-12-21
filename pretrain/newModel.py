@@ -9,7 +9,7 @@ from torch import nn
 
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask_for_sdpa
 
-GeoPriorGen3DOn = 1 # 0: 不使用3D几何先验，1: 使用3D几何先验
+GeoPriorGen3DOn = 0 # 0: 不使用3D几何先验，1: 使用3D几何先验
 
 
 ############################################################################################################
