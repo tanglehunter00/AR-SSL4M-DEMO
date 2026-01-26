@@ -14,7 +14,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
 from transformers.utils import logging
 
-from newNewNewModel import ReconModel, DecoderLayer
+from newNewModel import ReconModel, DecoderLayer
 from configs import fsdp_config as FSDP_CONFIG
 from configs import train_config as TRAIN_CONFIG
 from policies import AnyPrecisionAdamW, apply_fsdp_checkpointing
