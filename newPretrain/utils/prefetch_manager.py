@@ -10,6 +10,7 @@
 
 import random
 import shutil
+import tarfile
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -126,7 +127,15 @@ class PrefetchManager:
         self.proxy = proxy
         self.dataset_config = dataset_config
 
-        self.num_batches = len(ann_list) // batch_size
+        # tar.gz 模式：ann_list 每行一个 batch 的压缩包 URL；否则为每样本 npy URL
+        self.is_targz_mode = (
+            len(ann_list) > 0
+            and (ann_list[0].strip().endswith(".tar.gz") or ".tar.gz?" in ann_list[0])
+        )
+        if self.is_targz_mode:
+            self.num_batches = len(ann_list)
+        else:
+            self.num_batches = len(ann_list) // batch_size
         if batch_order is None:
             batch_order = list(range(self.num_batches))
         self.batch_order = batch_order
@@ -152,18 +161,29 @@ class PrefetchManager:
         return self.cache_dir / f"batch_{batch_idx}"
 
     def _download_batch(self, batch_idx: int) -> None:
-        """将指定 batch 的样本从 URL 下载到 cache_dir/batch_{idx}/"""
+        """将指定 batch 从 URL 下载到 cache_dir/batch_{idx}/（支持 npy 或 tar.gz）"""
         batch_dir = self._batch_dir(batch_idx)
         batch_dir.mkdir(parents=True, exist_ok=True)
-        start = batch_idx * self.batch_size
-        urls = self.ann_list[start : start + self.batch_size]
-        for i, url in enumerate(urls):
-            dest = batch_dir / f"{i}.npy"
-            if url.strip().startswith(("http://", "https://")):
-                _download_url_to_file(url.strip(), str(dest), self.proxy)
+
+        if self.is_targz_mode:
+            url = self.ann_list[batch_idx].strip()
+            archive_path = batch_dir / "archive.tar.gz"
+            if url.startswith(("http://", "https://")):
+                _download_url_to_file(url, str(archive_path), self.proxy)
             else:
-                # 本地路径，直接复制
-                shutil.copy(url.strip(), str(dest))
+                shutil.copy(url, str(archive_path))
+            with tarfile.open(archive_path, "r:gz") as tf:
+                tf.extractall(batch_dir)
+            archive_path.unlink(missing_ok=True)
+        else:
+            start = batch_idx * self.batch_size
+            urls = self.ann_list[start : start + self.batch_size]
+            for i, url in enumerate(urls):
+                dest = batch_dir / f"{i}.npy"
+                if url.strip().startswith(("http://", "https://")):
+                    _download_url_to_file(url.strip(), str(dest), self.proxy)
+                else:
+                    shutil.copy(url.strip(), str(dest))
         with self._lock:
             self._ready[batch_idx] = True
 
@@ -237,8 +257,13 @@ class PrefetchManager:
         batch_dir = self._batch_dir(batch_idx)
         rng = random.Random(random.randint(0, 2**31 - 1))
         samples = []
-        for i in range(self.batch_size):
-            fpath = batch_dir / f"{i}.npy"
+
+        if self.is_targz_mode:
+            npy_files = sorted(batch_dir.glob("*.npy"))
+        else:
+            npy_files = [batch_dir / f"{i}.npy" for i in range(self.batch_size)]
+
+        for fpath in npy_files:
             s = _process_single_file_to_sample(
                 str(fpath),
                 self.img_size,

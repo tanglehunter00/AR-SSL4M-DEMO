@@ -135,14 +135,20 @@ def main(**kwargs):
     prefetch_batch_iterator = None
     train_dataloader = None
     prefetch_manager = None
+    is_targz = False
 
     if train_config.use_prefetch:
         # 预取模式：训练前下载 step0,1,2，训练时异步预取，用后即删
         ann_list = dataset_train.ann
         batch_size = train_config.batch_size_training
-        num_train_batches = len(ann_list) // batch_size
+        is_targz = (
+            len(ann_list) > 0
+            and (ann_list[0].strip().endswith(".tar.gz") or ".tar.gz?" in ann_list[0])
+        )
+        num_train_batches = len(ann_list) if is_targz else len(ann_list) // batch_size
         if not train_config.enable_fsdp or rank == 0:
-            print(f"--> Prefetch mode: {num_train_batches} batches, buffer={train_config.prefetch_buffer_batches}")
+            mode_str = "tar.gz" if is_targz else "npy"
+            print(f"--> Prefetch mode ({mode_str}): {num_train_batches} batches, buffer={train_config.prefetch_buffer_batches}")
         prefetch_manager = PrefetchManager(
             ann_list=ann_list,
             batch_size=batch_size,
@@ -162,8 +168,8 @@ def main(**kwargs):
         )
 
     eval_dataloader = None
-    if train_config.run_validation:
-
+    if train_config.run_validation and not is_targz:
+        # tar.gz 模式下暂不支持 validation（需单独实现 prefetch 验证）
         val_dl_kwargs = get_dataloader_kwargs(train_config, dataset_val, "val")
 
         eval_dataloader = torch.utils.data.DataLoader(
