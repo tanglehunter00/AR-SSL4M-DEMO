@@ -36,7 +36,7 @@ def adjust_learning_rate(optimizer, epoch, train_config):
     return lr
 
 
-def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulation_steps, train_config, dataset_config, fsdp_config=None, local_rank=None, rank=None, test_dataloader=None):
+def train(model, train_dataloader, eval_dataloader, optimizer, gradient_accumulation_steps, train_config, dataset_config, fsdp_config=None, local_rank=None, rank=None, test_dataloader=None, prefetch_batch_iterator=None):
     """
     Trains the model on the given dataloader
 
@@ -77,16 +77,23 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
     checkpoint_times = []
     results = {}
     best_val_loss = float("inf")
+    use_prefetch = prefetch_batch_iterator is not None
+
     for epoch in range(train_config.num_epochs):
         epoch_start_time = time.perf_counter()
+        if use_prefetch:
+            batch_iterator, num_train_batches = prefetch_batch_iterator(epoch)
+        else:
+            batch_iterator = train_dataloader
+            num_train_batches = len(train_dataloader)
+        total_length = num_train_batches // gradient_accumulation_steps
         with MemoryTrace() as memtrace:  # track the memory usage
             model.train()
             total_loss = 0.0
-            total_length = len(train_dataloader)//gradient_accumulation_steps
             pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
-            for step, batch in enumerate(train_dataloader):
+            for step, batch in enumerate(batch_iterator):
                 if train_config.scheduler == 'CosineLR':
-                    lr = adjust_learning_rate(optimizer, step / len(train_dataloader) + epoch, train_config)
+                    lr = adjust_learning_rate(optimizer, step / num_train_batches + epoch, train_config)
                 for key in batch.keys():
                     if train_config.enable_fsdp:
                         batch[key] = batch[key].to(local_rank)
@@ -102,7 +109,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                 if train_config.use_fp16:
                     # if fp16 is enabled, use gradient scaler to handle gradient update
                     scaler.scale(loss).backward()
-                    if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                    if (step + 1) % gradient_accumulation_steps == 0 or step == num_train_batches - 1:
                         if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                             scaler.unscale_(optimizer)
                             if train_config.enable_fsdp:
@@ -116,7 +123,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                 else:
                     # regular backpropagation when fp16 is not used
                     loss.backward()
-                    if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                    if (step + 1) % gradient_accumulation_steps == 0 or step == num_train_batches - 1:
                         if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                             if train_config.enable_fsdp:
                                 model.clip_grad_norm_(train_config.gradient_clipping_threshold)
@@ -126,7 +133,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                         optimizer.zero_grad()
                         pbar.update(1)
 
-                pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
+                pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{num_train_batches} completed (loss: {loss.detach().float()})")
 
                 if train_config.save_metrics:
                     save_to_json(metrics_filename, train_step_loss, train_loss, val_step_loss, val_loss)
@@ -137,7 +144,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
         # Reducing total_loss across all devices if there's more than one CUDA device
         if torch.cuda.device_count() > 1 and train_config.enable_fsdp:
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        train_epoch_loss = total_loss / len(train_dataloader)
+        train_epoch_loss = total_loss / num_train_batches
         if train_config.enable_fsdp:
             train_epoch_loss = train_epoch_loss/world_size
         train_loss.append(float(train_epoch_loss))

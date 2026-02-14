@@ -8,6 +8,10 @@ class train_config:
     run_validation: bool=True
     batch_size_training: int=24
     batching_strategy: str="padding"
+    # 预取模式：先下载若干 batch 到磁盘，训练时异步预取，用后即删，避免 Colab 磁盘占满
+    use_prefetch: bool=False
+    prefetch_cache_dir: str="/tmp/ar_ssl4m_prefetch_cache"
+    prefetch_buffer_batches: int=3  # 预下载 batch 数（step0,1,2），训练 step0 时拉 step3
     gradient_accumulation_steps: int=1
     gradient_clipping: bool=False
     gradient_clipping_threshold: float = 1.0

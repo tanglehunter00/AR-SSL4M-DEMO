@@ -1,8 +1,14 @@
+import io
 import torch
 import random
 import numpy as np
 
 from torch.utils.data import Dataset
+
+try:
+    import requests
+except ImportError:
+    requests = None
 
 
 def read_txt(filepath):
@@ -10,6 +16,35 @@ def read_txt(filepath):
         data = f.readlines()
     data = [f.strip() for f in data]
     return data
+
+
+def _load_npy(source: str, proxy: str = None) -> np.ndarray:
+    """
+    从本地路径或 URL 加载 .npy 数据。
+    URL 模式：通过 requests 拉取到内存，不落盘，用后即释。
+    """
+    source = source.strip()
+    if source.startswith("http://") or source.startswith("https://"):
+        if requests is None:
+            raise ImportError("从 URL 加载数据需要安装 requests: pip install requests PySocks")
+        proxies = None
+        if proxy:
+            proxies = {"http": proxy, "https": proxy}
+        r = requests.get(source, proxies=proxies, timeout=30)
+        r.raise_for_status()
+        return np.load(io.BytesIO(r.content))
+    return np.load(source)
+
+
+def _is_spatial_single_file(ann: str) -> bool:
+    """判断是否为单个体积空间数据（本地 patch_random_spatial 或远程 .npy URL）"""
+    if "patch_random_spatial" in ann:
+        return True
+    ann = ann.strip()
+    if (ann.startswith("http://") or ann.startswith("https://")) and ".npy" in ann:
+        # 远程 URL 单文件，且非逗号分隔的 series
+        return "," not in ann
+    return False
 
 
 class get_custom_dataset(Dataset):
@@ -23,6 +58,7 @@ class get_custom_dataset(Dataset):
         self.grid_length = grid_length
         self.attention_type = dataset_config.attention_type
         self.series_length = dataset_config.series_length
+        self.fetch_proxy = getattr(dataset_config, "fetch_proxy", None)
 
         self.spatial = read_txt(dataset_config.spatial_path)
         self.contrast = read_txt(dataset_config.contrast_path)
@@ -58,8 +94,9 @@ class get_custom_dataset(Dataset):
     def __getitem__(self, index):
         ann = self.ann[index]
 
-        if 'patch_random_spatial' in ann:
-            input_image = np.load(ann)
+        if _is_spatial_single_file(ann):
+            # 本地 patch_random_spatial 或远程单 .npy URL：按需拉取，4 个 z-slice
+            input_image = _load_npy(ann, self.fetch_proxy)
             start, stride = random.randint(0, 63), 8
             z_size = self.img_size[2] // self.series_length
             input_image = torch.tensor(input_image)
@@ -70,7 +107,7 @@ class get_custom_dataset(Dataset):
         else:
             ann_split_list = ann.split(',')
             for split_id, ann_split in enumerate(ann_split_list):
-                input_image_single = np.load(ann_split)
+                input_image_single = _load_npy(ann_split.strip(), self.fetch_proxy)
                 input_image_single = torch.tensor(input_image_single)
                 if split_id == 0:
                     input_image = input_image_single

@@ -25,6 +25,7 @@ from utils.config_utils import (
     get_dataloader_kwargs,
 )
 from utils.dataset_utils import get_preprocessed_dataset
+from utils.prefetch_manager import PrefetchManager, make_prefetch_iterator_factory
 from utils.train_utils import (
     train,
     freeze_transformer_layers,
@@ -131,15 +132,34 @@ def main(**kwargs):
     if not train_config.enable_fsdp or rank == 0:
             print(f"--> Validation Set Length = {len(dataset_val)}")
 
-    train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")
+    prefetch_batch_iterator = None
+    train_dataloader = None
+    prefetch_manager = None
 
-    # Create DataLoaders for the training and validation dataset
-    train_dataloader = torch.utils.data.DataLoader(
-        dataset_train,
-        num_workers=train_config.num_workers_dataloader,
-        pin_memory=False,
-        **train_dl_kwargs,
-    )
+    if train_config.use_prefetch:
+        # 预取模式：训练前下载 step0,1,2，训练时异步预取，用后即删
+        ann_list = dataset_train.ann
+        batch_size = train_config.batch_size_training
+        num_train_batches = len(ann_list) // batch_size
+        if not train_config.enable_fsdp or rank == 0:
+            print(f"--> Prefetch mode: {num_train_batches} batches, buffer={train_config.prefetch_buffer_batches}")
+        prefetch_manager = PrefetchManager(
+            ann_list=ann_list,
+            batch_size=batch_size,
+            buffer_batches=train_config.prefetch_buffer_batches,
+            cache_dir=train_config.prefetch_cache_dir,
+            proxy=getattr(dataset_config, "fetch_proxy", None),
+            dataset_config=dataset_config,
+        )
+        prefetch_batch_iterator = make_prefetch_iterator_factory(prefetch_manager, shuffle=True)
+    else:
+        train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")
+        train_dataloader = torch.utils.data.DataLoader(
+            dataset_train,
+            num_workers=train_config.num_workers_dataloader,
+            pin_memory=False,
+            **train_dl_kwargs,
+        )
 
     eval_dataloader = None
     if train_config.run_validation:
@@ -182,9 +202,13 @@ def main(**kwargs):
         fsdp_config if train_config.enable_fsdp else None,
         local_rank if train_config.enable_fsdp else None,
         rank if train_config.enable_fsdp else None,
+        prefetch_batch_iterator=prefetch_batch_iterator,
     )
     if not train_config.enable_fsdp or rank==0:
         [print(f'Key: {k}, Value: {v}') for k, v in results.items()]
+
+    if prefetch_manager is not None:
+        prefetch_manager.shutdown()
 
 
 if __name__ == "__main__":

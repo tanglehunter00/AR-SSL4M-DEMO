@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -10,6 +11,8 @@ class custom_dataset:
     spatial_path: str = r"D:\demo\corrected_train_list.txt"
     contrast_path: str = r"D:\demo\corrected_train_list.txt"
     semantic_path: str = r"D:\demo\corrected_train_list.txt"
+    # 远程 URL 模式：通过代理拉取数据，按需加载到内存，用后即释，不占磁盘
+    fetch_proxy: Optional[str] = None  # 例如 "socks5h://127.0.0.1:1055"（Tailscale SOCKS5）
     img_size = [128, 128, 128]
     patch_size = [16, 16, 16]
     attention_type = 'prefix'
