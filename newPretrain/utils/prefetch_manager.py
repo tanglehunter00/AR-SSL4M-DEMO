@@ -132,8 +132,11 @@ class PrefetchManager:
         self.batch_order = batch_order
 
         self.img_size = dataset_config.img_size
-        patch_size = dataset_config.patch_size[0]
-        grid_size = [x // patch_size for x in self.img_size]
+        patch_size = dataset_config.patch_size
+        if isinstance(patch_size, (list, tuple)):
+            grid_size = [self.img_size[i] // patch_size[i] for i in range(3)]
+        else:
+            grid_size = [x // patch_size for x in self.img_size]
         self.grid_length = grid_size[0] * grid_size[1] * grid_size[2]
         self.attention_type = dataset_config.attention_type
         self.series_length = dataset_config.series_length

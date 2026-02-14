@@ -51,8 +51,11 @@ class get_custom_dataset(Dataset):
     def __init__(self, dataset_config, partition="train"):
 
         img_size = dataset_config.img_size
-        patch_size = dataset_config.patch_size[0]
-        grid_size = [x // patch_size for x in img_size]
+        patch_size = dataset_config.patch_size
+        if isinstance(patch_size, (list, tuple)):
+            grid_size = [img_size[i] // patch_size[i] for i in range(3)]
+        else:
+            grid_size = [x // patch_size for x in img_size]
         grid_length = grid_size[0] * grid_size[1] * grid_size[2]
         self.img_size = img_size
         self.grid_length = grid_length
