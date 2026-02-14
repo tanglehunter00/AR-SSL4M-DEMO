@@ -97,8 +97,11 @@ class get_custom_dataset(Dataset):
         if _is_spatial_single_file(ann):
             # 本地 patch_random_spatial 或远程单 .npy URL：按需拉取，4 个 z-slice
             input_image = _load_npy(ann, self.fetch_proxy)
-            start, stride = random.randint(0, 63), 8
-            z_size = self.img_size[2] // self.series_length
+            z_dim = self.img_size[2]
+            z_size = z_dim // self.series_length
+            stride = z_size
+            max_start = max(0, z_dim - 3 * stride - z_size)
+            start = random.randint(0, max_start) if max_start > 0 else 0
             input_image = torch.tensor(input_image)
             input_image = torch.cat((input_image[..., start: start + z_size],
                                      input_image[..., start + stride: start + stride + z_size],

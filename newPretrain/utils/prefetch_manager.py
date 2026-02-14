@@ -46,11 +46,14 @@ def _process_single_file_to_sample(
 ) -> Dict[str, np.ndarray]:
     """
     从本地 .npy 文件生成单个样本（与 image_dataset 相同逻辑，但源为本地路径）。
-    假定所有 prefetch 文件均为单体积空间数据（128^3，4 个 z-slice）。
+    支持 128×128×32 或 128×128×128 等单体积空间数据，自动按 img_size 计算切片范围。
     """
     input_image = np.load(file_path)
-    start, stride = rng.randint(0, 63), 8
-    z_size = img_size[2] // series_length
+    z_dim = img_size[2]
+    z_size = z_dim // series_length
+    stride = z_size
+    max_start = max(0, z_dim - 3 * stride - z_size)
+    start = rng.randint(0, max_start) if max_start > 0 else 0
     input_image = torch.tensor(input_image)
     input_image = torch.cat(
         (
