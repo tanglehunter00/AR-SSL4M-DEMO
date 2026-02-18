@@ -1,5 +1,8 @@
+import io
+import os
 import torch
 import random
+import tarfile
 import numpy as np
 
 from torch.utils.data import Dataset
@@ -10,6 +13,21 @@ def read_txt(filepath):
         data = f.readlines()
     data = [f.strip() for f in data]
     return data
+
+
+def _load_from_tar(tar_path, base_path):
+    """Load 4 npy (t1n,t1c,t2w,t2f) from tar at base_path, concat along dim=-1."""
+    suffixes = ['.t1n.npy', '.t1c.npy', '.t2w.npy', '.t2f.npy']
+    arrays = []
+    with tarfile.open(tar_path, 'r:gz') as tar:
+        for suf in suffixes:
+            member = base_path + suf
+            f = tar.extractfile(member)
+            if f is None:
+                raise FileNotFoundError(f"Member {member} not in {tar_path}")
+            arr = np.load(io.BytesIO(f.read()))
+            arrays.append(arr)
+    return np.concatenate(arrays, axis=-1)
 
 
 class get_custom_dataset(Dataset):
@@ -58,7 +76,8 @@ class get_custom_dataset(Dataset):
     def __getitem__(self, index):
         ann = self.ann[index]
 
-        if 'patch_random_spatial' in ann:
+        # Spatial: patch_random_spatial or patch_random_lidc (128^3 single file)
+        if 'patch_random_spatial' in ann or 'patch_random_lidc' in ann:
             input_image = np.load(ann)
             start, stride = random.randint(0, 63), 8
             z_size = self.img_size[2] // self.series_length
@@ -67,10 +86,21 @@ class get_custom_dataset(Dataset):
                                      input_image[..., start + stride: start + stride + z_size],
                                      input_image[..., start + 2 * stride: start + 2 * stride + z_size],
                                      input_image[..., start + 3 * stride: start + 3 * stride + z_size]), dim=-1).flatten()
+        # BraTS contrast: tar_path:base_path (load 4 npy from tar without extract)
+        elif ':' in ann and ann.count(',') == 0:
+            parts = ann.split(':', 1)
+            if len(parts) == 2 and parts[0].endswith('.tar.gz') and os.path.exists(parts[0]):
+                tar_path, base_path = parts[0], parts[1]
+                input_image = _load_from_tar(tar_path, base_path)
+                input_image = torch.tensor(input_image).float()
+                input_image = input_image.flatten()
+            else:
+                raise ValueError(f"Invalid tar format or file not found: {ann[:80]}...")
+        # Semantic / legacy contrast: comma-separated paths (4 files)
         else:
             ann_split_list = ann.split(',')
             for split_id, ann_split in enumerate(ann_split_list):
-                input_image_single = np.load(ann_split)
+                input_image_single = np.load(ann_split.strip())
                 input_image_single = torch.tensor(input_image_single)
                 if split_id == 0:
                     input_image = input_image_single
