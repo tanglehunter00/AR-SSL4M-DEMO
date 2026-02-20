@@ -25,6 +25,7 @@ from utils.config_utils import (
     get_dataloader_kwargs,
 )
 from utils.dataset_utils import get_preprocessed_dataset
+from brats_contrast_loader import create_brats_contrast_loader
 from utils.train_utils import (
     train,
     freeze_transformer_layers,
@@ -131,15 +132,36 @@ def main(**kwargs):
     if not train_config.enable_fsdp or rank == 0:
             print(f"--> Validation Set Length = {len(dataset_val)}")
 
-    train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")
-
-    # Create DataLoaders for the training and validation dataset
-    train_dataloader = torch.utils.data.DataLoader(
-        dataset_train,
-        num_workers=train_config.num_workers_dataloader,
-        pin_memory=False,
-        **train_dl_kwargs,
+    # BraTS 对比训练专用：使用本地缓存+异步拉取，不修改 Drive
+    use_brats_cache = getattr(train_config, "use_brats_local_cache", False)
+    contrast_path = getattr(dataset_config, "contrast_path", "")
+    add_spatial = getattr(dataset_config, "add_spatial_data", True)
+    add_series = getattr(dataset_config, "add_series_data", False)
+    contrast_has_data = (
+        contrast_path and os.path.exists(contrast_path) and os.path.getsize(contrast_path) > 0
     )
+    is_brats_contrast_only = (
+        use_brats_cache and add_series and contrast_has_data and not add_spatial
+    )
+
+    if is_brats_contrast_only:
+        if not train_config.enable_fsdp or rank == 0:
+            print("--> Using BraTS local cache (download to Colab, async prefetch, no Drive modification)")
+        train_dataloader = create_brats_contrast_loader(
+            contrast_path=contrast_path,
+            dataset_config=dataset_config,
+            batch_size=train_config.batch_size_training,
+            local_cache_root="/content/brats_cache",
+            preload_tars=2,
+        )
+    else:
+        train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")
+        train_dataloader = torch.utils.data.DataLoader(
+            dataset_train,
+            num_workers=train_config.num_workers_dataloader,
+            pin_memory=False,
+            **train_dl_kwargs,
+        )
 
     eval_dataloader = None
     if train_config.run_validation:

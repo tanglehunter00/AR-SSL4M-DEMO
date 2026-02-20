@@ -28,6 +28,7 @@ class train_config:
     save_model: bool=True
     save_optimizer: bool=False
     save_metrics: bool=False
+    use_brats_local_cache: bool=True  # BraTS 对比训练时使用本地缓存+异步拉取，不修改 Drive
     scheduler:str='CosineLR'
     min_lr: float=0
     pos_type: str='sincos3d'
