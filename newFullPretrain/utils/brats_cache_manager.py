@@ -130,10 +130,19 @@ class BraTSLocalCacheManager:
         if not os.path.exists(tar_path):
             raise FileNotFoundError(f"Drive 上不存在: {tar_path}")
 
+        t0 = time.perf_counter()
         shutil.copy2(tar_path, local_tar)
+        copy_time = time.perf_counter() - t0
+        if self.verbose:
+            print(f"  [复制 Drive→本地] {os.path.basename(tar_path)}: {copy_time:.2f}s")
+
         os.makedirs(local_extract, exist_ok=True)
+        t0 = time.perf_counter()
         with tarfile.open(local_tar, 'r:gz') as tar:
             tar.extractall(local_extract)
+        extract_time = time.perf_counter() - t0
+        if self.verbose:
+            print(f"  [解压] {os.path.basename(tar_path)}: {extract_time:.2f}s")
 
         with self._lock:
             self._local_tars[tar_idx] = local_extract
@@ -270,6 +279,17 @@ class BraTSLocalCacheManager:
             with self._lock:
                 self._local_tars.pop(tar_idx, None)
                 self._local_tar_paths.pop(tar_idx, None)
+
+    def get_local_status(self) -> List[Tuple[str, int]]:
+        """返回当前本地各 tar 的剩余样本数 [(tar_name, 剩余npy组数/样本数), ...]"""
+        status = []
+        for idx in sorted(self._local_tars.keys()):
+            tar_path, bases = self.tar_samples[idx]
+            tar_name = os.path.basename(tar_path)
+            remaining = len(self._get_remaining_for_tar(idx))
+            if remaining > 0:
+                status.append((tar_name, remaining))
+        return status
 
     def cleanup_finished_tars_from_batch(self, batch_info: List[Tuple[str, str, str]]) -> None:
         """根据本批使用的样本，检查并清理已完全消费的 tar"""

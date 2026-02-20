@@ -7,6 +7,7 @@ from typing import Iterator, Dict, Any, Optional
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from utils.brats_cache_manager import BraTSLocalCacheManager, _load_sample_from_local
 
@@ -126,6 +127,11 @@ class BraTSContrastIterator:
 
         self._manager.mark_batch_used(batch_info)
         self._manager.cleanup_finished_tars_from_batch(batch_info)
+
+        if self.verbose:
+            status = self._manager.get_local_status()
+            parts = [f"{name}: 剩余{cnt}个样本" for name, cnt in status]
+            tqdm.write(f"[BraTS 本地缓存] 当前: {' | '.join(parts) if parts else '(无)'}")
 
         self._consumed_batches += 1
         return batch
