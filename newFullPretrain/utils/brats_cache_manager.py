@@ -15,6 +15,12 @@ from typing import List, Tuple, Optional, Dict
 
 import numpy as np
 
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+
 
 def _read_contrast_list(contrast_path: str) -> List[Tuple[str, str]]:
     """读取 train_contrast.txt，返回 [(tar_path, base_path), ...]"""
@@ -49,6 +55,23 @@ def _load_sample_from_local(local_extract_dir: str, base_path: str) -> np.ndarra
         arr = np.load(p)
         arrays.append(arr)
     return np.concatenate(arrays, axis=-1)
+
+
+def _file_lock_context(lock_path: str):
+    """跨进程文件锁，避免多 worker 同时复制/解压同一 tar"""
+    if _HAS_FCNTL:
+        lock_dir = os.path.dirname(lock_path)
+        if lock_dir:
+            os.makedirs(lock_dir, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+    else:
+        yield
 
 
 def _delete_sample_npy(local_extract_dir: str, base_path: str) -> None:
@@ -369,7 +392,7 @@ class BraTSHybridCacheManager:
                     break
 
     def _load_tar(self, tar_idx: int) -> None:
-        """下载并解压 tar，将样本加入 _remaining"""
+        """下载并解压 tar，将样本加入 _remaining。使用文件锁避免多 worker 竞态。"""
         if tar_idx >= self.total_tars:
             return
         with self._lock:
@@ -380,42 +403,87 @@ class BraTSHybridCacheManager:
         tar_name = os.path.basename(tar_path).replace('.tar.gz', '')
         local_tar = os.path.join(self.local_cache_root, f"hybrid_{tar_idx}_{tar_name}.tar.gz")
         local_extract = os.path.join(self.local_cache_root, f"hybrid_{tar_idx}_{tar_name}")
+        lock_path = os.path.join(self.local_cache_root, f".lock_hybrid_{tar_idx}")
 
         if os.path.isdir(local_extract) and all(
             os.path.exists(os.path.join(local_extract, b + '.t1n.npy')) for b in bases[:1]
         ):
             with self._lock:
-                self._local_tars[tar_idx] = local_extract
-                self._local_tar_paths[tar_idx] = local_tar
-                for i, b in enumerate(bases):
-                    self._remaining.append((tar_idx, i, local_extract))
-                self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+                if tar_idx not in self._local_tars:
+                    self._local_tars[tar_idx] = local_extract
+                    self._local_tar_paths[tar_idx] = local_tar
+                    for i, b in enumerate(bases):
+                        self._remaining.append((tar_idx, i, local_extract))
+                    self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
             return
 
-        if self.verbose:
-            print(f"[BraTS 混训缓存] 预加载 tar {tar_idx}/{self.total_tars}: {os.path.basename(tar_path)}")
+        with _file_lock_context(lock_path):
+            with self._lock:
+                if tar_idx in self._local_tars:
+                    return
+            if os.path.isdir(local_extract) and all(
+                os.path.exists(os.path.join(local_extract, b + '.t1n.npy')) for b in bases[:1]
+            ):
+                with self._lock:
+                    if tar_idx not in self._local_tars:
+                        self._local_tars[tar_idx] = local_extract
+                        self._local_tar_paths[tar_idx] = local_tar
+                        for i, b in enumerate(bases):
+                            self._remaining.append((tar_idx, i, local_extract))
+                        self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+                return
 
-        if not os.path.exists(local_tar):
-            if not os.path.exists(tar_path):
-                raise FileNotFoundError(f"Drive 上不存在: {tar_path}")
-            t0 = time.perf_counter()
-            shutil.copy2(tar_path, local_tar)
             if self.verbose:
-                print(f"  [复制] {os.path.basename(tar_path)}: {time.perf_counter()-t0:.2f}s")
+                print(f"[BraTS 混训缓存] 预加载 tar {tar_idx}/{self.total_tars}: {os.path.basename(tar_path)}")
 
-        os.makedirs(local_extract, exist_ok=True)
-        t0 = time.perf_counter()
-        with tarfile.open(local_tar, 'r:gz') as tar:
-            tar.extractall(local_extract)
-        if self.verbose:
-            print(f"  [解压] {os.path.basename(tar_path)}: {time.perf_counter()-t0:.2f}s")
+            need_copy = True
+            if os.path.exists(local_tar):
+                try:
+                    sz = os.path.getsize(local_tar)
+                    if sz < 1024:
+                        os.remove(local_tar)
+                    else:
+                        need_copy = False
+                except OSError:
+                    need_copy = True
 
-        with self._lock:
-            self._local_tars[tar_idx] = local_extract
-            self._local_tar_paths[tar_idx] = local_tar
-            for i, b in enumerate(bases):
-                self._remaining.append((tar_idx, i, local_extract))
-            self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+            if need_copy:
+                if not os.path.exists(tar_path):
+                    raise FileNotFoundError(f"Drive 上不存在: {tar_path}")
+                t0 = time.perf_counter()
+                shutil.copy2(tar_path, local_tar)
+                if self.verbose:
+                    print(f"  [复制] {os.path.basename(tar_path)}: {time.perf_counter()-t0:.2f}s")
+
+            os.makedirs(local_extract, exist_ok=True)
+            t0 = time.perf_counter()
+            try:
+                with tarfile.open(local_tar, 'r:gz') as tar:
+                    tar.extractall(local_extract)
+            except tarfile.ReadError as e:
+                if "empty" in str(e).lower() or "empty file" in str(e).lower():
+                    try:
+                        os.remove(local_tar)
+                        shutil.rmtree(local_extract, ignore_errors=True)
+                    except OSError:
+                        pass
+                    if not os.path.exists(tar_path):
+                        raise FileNotFoundError(f"Drive 上不存在: {tar_path}") from e
+                    shutil.copy2(tar_path, local_tar)
+                    with tarfile.open(local_tar, 'r:gz') as tar:
+                        tar.extractall(local_extract)
+                else:
+                    raise
+            if self.verbose:
+                print(f"  [解压] {os.path.basename(tar_path)}: {time.perf_counter()-t0:.2f}s")
+
+            with self._lock:
+                if tar_idx not in self._local_tars:
+                    self._local_tars[tar_idx] = local_extract
+                    self._local_tar_paths[tar_idx] = local_tar
+                    for i, b in enumerate(bases):
+                        self._remaining.append((tar_idx, i, local_extract))
+                    self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
 
     def get_batch_samples(self, n: int) -> List[Tuple[str, str, str]]:
         """
