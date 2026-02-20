@@ -84,16 +84,31 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
             total_loss = 0.0
             total_length = len(train_dataloader)//gradient_accumulation_steps
             pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
+            t_dataloader_start = time.perf_counter()
             for step, batch in enumerate(train_dataloader):
+                # DataLoader 取 batch 耗时（从上一次循环结束到本次拿到 batch）
+                step_dataloader_time = time.perf_counter() - t_dataloader_start
+
+                # 提取并移除 file_path，避免传入模型
+                file_paths = batch.pop("file_path", None)
+                if file_paths is not None and not isinstance(file_paths, (list, tuple)):
+                    file_paths = (file_paths,)  # 单样本时 collate 可能不包装成 tuple
+
                 # 每个 optimizer step 开始时初始化本步用时累加器
                 if step % gradient_accumulation_steps == 0:
                     step_data_time = 0.0
+                    step_dataloader_time_acc = 0.0
                     step_forward_time = 0.0
                     step_backward_time = 0.0
                     step_grad_clip_time = 0.0
                     step_optimizer_time = 0.0
                     step_loss_sum = 0.0
                     step_batch_count = 0
+                    step_file_paths_list = []
+
+                step_dataloader_time_acc += step_dataloader_time
+                if file_paths is not None:
+                    step_file_paths_list.extend(file_paths if isinstance(file_paths, (list, tuple)) else [file_paths])
 
                 if train_config.scheduler == 'CosineLR':
                     lr = adjust_learning_rate(optimizer, step / len(train_dataloader) + epoch, train_config)
@@ -152,18 +167,21 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                         pbar.update(1)
                         opt_step = step // gradient_accumulation_steps
                         avg_loss = step_loss_sum / step_batch_count
-                        total_step_time = step_data_time + step_forward_time + step_backward_time + step_grad_clip_time + step_optimizer_time
+                        total_step_time = step_dataloader_time_acc + step_data_time + step_forward_time + step_backward_time + step_grad_clip_time + step_optimizer_time
                         # 使用 tqdm.write 输出，不刷新覆盖，每步信息持久保留
                         tqdm.write(
                             f"[Epoch {epoch+1}/{train_config.num_epochs}] Step {opt_step}/{total_length} | "
                             f"loss: {avg_loss:.6f} | "
                             f"总用时: {total_step_time:.3f}s | "
+                            f"DataLoader取batch: {step_dataloader_time_acc:.3f}s | "
                             f"数据到设备: {step_data_time:.3f}s | "
                             f"前向: {step_forward_time:.3f}s | "
                             f"反向: {step_backward_time:.3f}s | "
                             f"梯度裁剪: {step_grad_clip_time:.3f}s | "
                             f"优化器步进: {step_optimizer_time:.3f}s"
                         )
+                        for fp in step_file_paths_list:
+                            tqdm.write(f"  文件: {fp}")
                 else:
                     # regular backpropagation when fp16 is not used
                     t0 = time.perf_counter()
@@ -189,17 +207,23 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                         pbar.update(1)
                         opt_step = step // gradient_accumulation_steps
                         avg_loss = step_loss_sum / step_batch_count
-                        total_step_time = step_data_time + step_forward_time + step_backward_time + step_grad_clip_time + step_optimizer_time
+                        total_step_time = step_dataloader_time_acc + step_data_time + step_forward_time + step_backward_time + step_grad_clip_time + step_optimizer_time
                         tqdm.write(
                             f"[Epoch {epoch+1}/{train_config.num_epochs}] Step {opt_step}/{total_length} | "
                             f"loss: {avg_loss:.6f} | "
                             f"总用时: {total_step_time:.3f}s | "
+                            f"DataLoader取batch: {step_dataloader_time_acc:.3f}s | "
                             f"数据到设备: {step_data_time:.3f}s | "
                             f"前向: {step_forward_time:.3f}s | "
                             f"反向: {step_backward_time:.3f}s | "
                             f"梯度裁剪: {step_grad_clip_time:.3f}s | "
                             f"优化器步进: {step_optimizer_time:.3f}s"
                         )
+                        for fp in step_file_paths_list:
+                            tqdm.write(f"  文件: {fp}")
+
+                # 为本轮循环结束计时，供下一轮 DataLoader 耗时计算
+                t_dataloader_start = time.perf_counter()
 
                 if train_config.save_metrics:
                     save_to_json(metrics_filename, train_step_loss, train_loss, val_step_loss, val_loss)

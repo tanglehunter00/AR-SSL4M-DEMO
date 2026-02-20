@@ -125,4 +125,5 @@ class get_custom_dataset(Dataset):
             "input_image": np.array(input_image),
             "attention_mask": np.array(attention_mask),
             "prefix_mask": np.array(prefix_mask),
+            "file_path": ann,  # 文件路径，用于训练时打印
         }
