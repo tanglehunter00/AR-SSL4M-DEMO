@@ -85,48 +85,121 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
             total_length = len(train_dataloader)//gradient_accumulation_steps
             pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
             for step, batch in enumerate(train_dataloader):
+                # 每个 optimizer step 开始时初始化本步用时累加器
+                if step % gradient_accumulation_steps == 0:
+                    step_data_time = 0.0
+                    step_forward_time = 0.0
+                    step_backward_time = 0.0
+                    step_grad_clip_time = 0.0
+                    step_optimizer_time = 0.0
+                    step_loss_sum = 0.0
+                    step_batch_count = 0
+
                 if train_config.scheduler == 'CosineLR':
                     lr = adjust_learning_rate(optimizer, step / len(train_dataloader) + epoch, train_config)
+
+                # 1. 数据到设备
+                t0 = time.perf_counter()
                 for key in batch.keys():
                     if train_config.enable_fsdp:
                         batch[key] = batch[key].to(local_rank)
                     else:
                         batch[key] = batch[key].to('cuda:0')
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+                step_data_time += time.perf_counter() - t0
+
+                # 2. 前向
+                t0 = time.perf_counter()
                 with autocast():
                     # loss = model(**batch).loss
                     loss = model(**batch)[0]
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+                step_forward_time += time.perf_counter() - t0
+
                 loss = loss / gradient_accumulation_steps
+                step_loss_sum += loss.detach().float().item()
+                step_batch_count += 1
                 if train_config.save_metrics:
                     train_step_loss.append(loss.detach().float().item())
                 total_loss += loss.detach().float()
+
                 if train_config.use_fp16:
-                    # if fp16 is enabled, use gradient scaler to handle gradient update
+                    # 3. 反向
+                    t0 = time.perf_counter()
                     scaler.scale(loss).backward()
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    step_backward_time += time.perf_counter() - t0
+
                     if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                        # 4. 梯度裁剪
                         if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
+                            t0 = time.perf_counter()
                             scaler.unscale_(optimizer)
                             if train_config.enable_fsdp:
                                 model.clip_grad_norm_(train_config.gradient_clipping_threshold)
                             else:
                                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
+                            torch.cuda.synchronize() if torch.cuda.is_available() else None
+                            step_grad_clip_time += time.perf_counter() - t0
+                        # 5. 优化器步进
+                        t0 = time.perf_counter()
                         scaler.step(optimizer)
                         scaler.update()
                         optimizer.zero_grad()
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        step_optimizer_time += time.perf_counter() - t0
+
                         pbar.update(1)
+                        opt_step = step // gradient_accumulation_steps
+                        avg_loss = step_loss_sum / step_batch_count
+                        total_step_time = step_data_time + step_forward_time + step_backward_time + step_grad_clip_time + step_optimizer_time
+                        # 使用 tqdm.write 输出，不刷新覆盖，每步信息持久保留
+                        tqdm.write(
+                            f"[Epoch {epoch+1}/{train_config.num_epochs}] Step {opt_step}/{total_length} | "
+                            f"loss: {avg_loss:.6f} | "
+                            f"总用时: {total_step_time:.3f}s | "
+                            f"数据到设备: {step_data_time:.3f}s | "
+                            f"前向: {step_forward_time:.3f}s | "
+                            f"反向: {step_backward_time:.3f}s | "
+                            f"梯度裁剪: {step_grad_clip_time:.3f}s | "
+                            f"优化器步进: {step_optimizer_time:.3f}s"
+                        )
                 else:
                     # regular backpropagation when fp16 is not used
+                    t0 = time.perf_counter()
                     loss.backward()
+                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    step_backward_time += time.perf_counter() - t0
+
                     if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                         if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
+                            t0 = time.perf_counter()
                             if train_config.enable_fsdp:
                                 model.clip_grad_norm_(train_config.gradient_clipping_threshold)
                             else:
                                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
+                            torch.cuda.synchronize() if torch.cuda.is_available() else None
+                            step_grad_clip_time += time.perf_counter() - t0
+                        t0 = time.perf_counter()
                         optimizer.step()
                         optimizer.zero_grad()
-                        pbar.update(1)
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                        step_optimizer_time += time.perf_counter() - t0
 
-                pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
+                        pbar.update(1)
+                        opt_step = step // gradient_accumulation_steps
+                        avg_loss = step_loss_sum / step_batch_count
+                        total_step_time = step_data_time + step_forward_time + step_backward_time + step_grad_clip_time + step_optimizer_time
+                        tqdm.write(
+                            f"[Epoch {epoch+1}/{train_config.num_epochs}] Step {opt_step}/{total_length} | "
+                            f"loss: {avg_loss:.6f} | "
+                            f"总用时: {total_step_time:.3f}s | "
+                            f"数据到设备: {step_data_time:.3f}s | "
+                            f"前向: {step_forward_time:.3f}s | "
+                            f"反向: {step_backward_time:.3f}s | "
+                            f"梯度裁剪: {step_grad_clip_time:.3f}s | "
+                            f"优化器步进: {step_optimizer_time:.3f}s"
+                        )
 
                 if train_config.save_metrics:
                     save_to_json(metrics_filename, train_step_loss, train_loss, val_step_loss, val_loss)
