@@ -79,6 +79,11 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
     best_val_loss = float("inf")
     for epoch in range(train_config.num_epochs):
         epoch_start_time = time.perf_counter()
+        # 混训 BraTS 缓存：每 epoch 重置，使上轮消费的样本可在本 epoch 重新使用
+        if hasattr(train_dataloader, 'dataset') and hasattr(train_dataloader.dataset, '_brats_cache'):
+            cache = getattr(train_dataloader.dataset, '_brats_cache', None)
+            if cache is not None and epoch > 0:
+                cache.reset_for_epoch()
         with MemoryTrace() as memtrace:  # track the memory usage
             model.train()
             total_loss = 0.0

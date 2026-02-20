@@ -313,3 +313,198 @@ class BraTSLocalCacheManager:
             except Exception as e:
                 if self.verbose:
                     print(f"[BraTS Cache] 清理失败: {e}")
+
+
+class BraTSHybridCacheManager:
+    """
+    混训模式 BraTS 缓存：本地保持 ≥min_local_samples 个样本，
+    每次按需从本地 tar 中随机抽取，用后即删（消费），本 epoch 内不会再出现，直到下个 epoch。
+    """
+
+    def __init__(
+        self,
+        contrast_path: str,
+        local_cache_root: str = "/content/brats_cache",
+        min_local_samples: int = 100,
+        preload_tars: int = 2,
+        verbose: bool = True,
+        keep_tar_for_epoch_reset: bool = True,
+    ):
+        self.contrast_path = contrast_path
+        self.local_cache_root = local_cache_root
+        self.min_local_samples = min_local_samples
+        self.preload_tars = preload_tars
+        self.verbose = verbose
+        self.keep_tar_for_epoch_reset = keep_tar_for_epoch_reset
+
+        os.makedirs(local_cache_root, exist_ok=True)
+
+        entries = _read_contrast_list(contrast_path)
+        self.tar_samples = _group_by_tar(entries)
+        self.total_tars = len(self.tar_samples)
+        self.total_samples = sum(len(bases) for _, bases in self.tar_samples)
+
+        self._local_tars: Dict[int, str] = {}
+        self._local_tar_paths: Dict[int, str] = {}
+        self._remaining: List[Tuple[int, int, str]] = []  # (tar_idx, base_idx_in_tar, local_dir)
+        self._lock = threading.Lock()
+        self._loaded_tar_range: int = 0  # 已加载的最大 tar 索引+1
+
+        if self.verbose:
+            print(f"[BraTS 混训缓存] 共 {self.total_tars} 个 tar, 本地保持 ≥{min_local_samples} 个, 用后即删")
+
+    def _ensure_min_local(self) -> None:
+        """确保本地剩余样本 ≥ min_local_samples，不足则预取下一个 tar"""
+        with self._lock:
+            n = len(self._remaining)
+        if n >= self.min_local_samples:
+            return
+
+        next_tar = self._loaded_tar_range
+        while next_tar < self.total_tars:
+            self._load_tar(next_tar)
+            next_tar += 1
+            with self._lock:
+                if len(self._remaining) >= self.min_local_samples:
+                    break
+
+    def _load_tar(self, tar_idx: int) -> None:
+        """下载并解压 tar，将样本加入 _remaining"""
+        if tar_idx >= self.total_tars:
+            return
+        with self._lock:
+            if tar_idx in self._local_tars:
+                return
+
+        tar_path, bases = self.tar_samples[tar_idx]
+        tar_name = os.path.basename(tar_path).replace('.tar.gz', '')
+        local_tar = os.path.join(self.local_cache_root, f"hybrid_{tar_idx}_{tar_name}.tar.gz")
+        local_extract = os.path.join(self.local_cache_root, f"hybrid_{tar_idx}_{tar_name}")
+
+        if os.path.isdir(local_extract) and all(
+            os.path.exists(os.path.join(local_extract, b + '.t1n.npy')) for b in bases[:1]
+        ):
+            with self._lock:
+                self._local_tars[tar_idx] = local_extract
+                self._local_tar_paths[tar_idx] = local_tar
+                for i, b in enumerate(bases):
+                    self._remaining.append((tar_idx, i, local_extract))
+                self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+            return
+
+        if self.verbose:
+            print(f"[BraTS 混训缓存] 预加载 tar {tar_idx}/{self.total_tars}: {os.path.basename(tar_path)}")
+
+        if not os.path.exists(local_tar):
+            if not os.path.exists(tar_path):
+                raise FileNotFoundError(f"Drive 上不存在: {tar_path}")
+            t0 = time.perf_counter()
+            shutil.copy2(tar_path, local_tar)
+            if self.verbose:
+                print(f"  [复制] {os.path.basename(tar_path)}: {time.perf_counter()-t0:.2f}s")
+
+        os.makedirs(local_extract, exist_ok=True)
+        t0 = time.perf_counter()
+        with tarfile.open(local_tar, 'r:gz') as tar:
+            tar.extractall(local_extract)
+        if self.verbose:
+            print(f"  [解压] {os.path.basename(tar_path)}: {time.perf_counter()-t0:.2f}s")
+
+        with self._lock:
+            self._local_tars[tar_idx] = local_extract
+            self._local_tar_paths[tar_idx] = local_tar
+            for i, b in enumerate(bases):
+                self._remaining.append((tar_idx, i, local_extract))
+            self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+
+    def get_batch_samples(self, n: int) -> List[Tuple[str, str, str]]:
+        """
+        从本地剩余样本中随机抽取 n 个，返回 (tar_path, base_path, local_dir)。
+        抽取后从池中移除，用完后需调用 mark_batch_used 删除 npy。
+        """
+        self._ensure_min_local()
+        with self._lock:
+            pool = list(self._remaining)
+        if len(pool) < n:
+            raise RuntimeError(f"[BraTS 混训缓存] 本地剩余 {len(pool)} 个样本，需要 {n} 个")
+
+        chosen = random.sample(pool, n)
+        base_by_tar = self.tar_samples
+
+        batch = []
+        with self._lock:
+            chosen_set = set((t, i) for t, i, _ in chosen)
+            self._remaining = [(t, i, d) for t, i, d in self._remaining if (t, i) not in chosen_set]
+
+        for tar_idx, base_idx, local_dir in chosen:
+            tar_path, bases = base_by_tar[tar_idx]
+            base_path = bases[base_idx]
+            batch.append((tar_path, base_path, local_dir))
+
+        return batch
+
+    def mark_batch_used(self, batch_info: List[Tuple[str, str, str]]) -> None:
+        """标记已使用，删除对应 npy，本 epoch 内不可再用"""
+        for _, base_path, local_dir in batch_info:
+            _delete_sample_npy(local_dir, base_path)
+
+    def _maybe_cleanup_exhausted_tar(self, local_dir: str) -> None:
+        """若某 tar 的样本已全部消费，删除解压目录（保留 tar.gz 以便下个 epoch 重解压）"""
+        for tar_idx, ld in list(self._local_tars.items()):
+            if ld != local_dir:
+                continue
+            _, bases = self.tar_samples[tar_idx]
+            all_gone = all(
+                not os.path.exists(os.path.join(local_dir, b + '.t1n.npy'))
+                for b in bases
+            )
+            if all_gone:
+                try:
+                    shutil.rmtree(local_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                with self._lock:
+                    self._local_tars.pop(tar_idx, None)
+                if not self.keep_tar_for_epoch_reset:
+                    pt = self._local_tar_paths.pop(tar_idx, None)
+                    if pt and os.path.exists(pt):
+                        try:
+                            os.remove(pt)
+                        except OSError:
+                            pass
+                break
+
+    def cleanup_after_batch(self, batch_info: List[Tuple[str, str, str]]) -> None:
+        """根据本批使用的样本，检查并清理已完全消费的 tar 的解压目录"""
+        seen = set()
+        for _, _, local_dir in batch_info:
+            if local_dir not in seen:
+                seen.add(local_dir)
+                self._maybe_cleanup_exhausted_tar(local_dir)
+
+    def reset_for_epoch(self) -> None:
+        """下个 epoch：清空消费状态，若保留 tar.gz 则重新解压前 preload_tars 个 tar"""
+        with self._lock:
+            self._remaining.clear()
+            self._local_tars.clear()
+            self._loaded_tar_range = 0
+
+        for i in range(min(self.preload_tars, self.total_tars)):
+            self._load_tar(i)
+        if self.verbose:
+            with self._lock:
+                print(f"[BraTS 混训缓存] Epoch 重置完成, 本地剩余 {len(self._remaining)} 个样本")
+
+    def get_local_status(self) -> List[Tuple[str, int]]:
+        """[(tar_name, 剩余样本数), ...]"""
+        status = []
+        with self._lock:
+            rem = list(self._remaining)
+            tars = dict(self._local_tars)
+        for tar_idx in sorted(tars.keys()):
+            tar_path, _ = self.tar_samples[tar_idx]
+            local_dir = tars[tar_idx]
+            cnt = sum(1 for _, _, d in rem if d == local_dir)
+            if cnt > 0:
+                status.append((os.path.basename(tar_path), cnt))
+        return status

@@ -26,6 +26,7 @@ from utils.config_utils import (
 )
 from utils.dataset_utils import get_preprocessed_dataset
 from brats_contrast_loader import create_brats_contrast_loader
+from hybrid_dataset import HybridDataset
 from utils.train_utils import (
     train,
     freeze_transformer_layers,
@@ -143,6 +144,9 @@ def main(**kwargs):
     is_brats_contrast_only = (
         use_brats_cache and add_series and contrast_has_data and not add_spatial
     )
+    is_hybrid_with_brats_cache = (
+        use_brats_cache and contrast_has_data and (add_spatial or add_series)
+    )
 
     if is_brats_contrast_only:
         if not train_config.enable_fsdp or rank == 0:
@@ -153,6 +157,24 @@ def main(**kwargs):
             batch_size=train_config.batch_size_training,
             local_cache_root="/content/brats_cache",
             preload_tars=2,
+        )
+    elif is_hybrid_with_brats_cache:
+        if not train_config.enable_fsdp or rank == 0:
+            print("--> 混训 (LIDC+BraTS+DeepLesion)，BraTS 从本地缓存随机抽取，用后即删")
+        dataset_train = HybridDataset(
+            dataset_config,
+            partition="train",
+            local_cache_root="/content/brats_cache",
+            min_brats_local=100,
+            preload_tars=2,
+            verbose=not train_config.enable_fsdp or rank == 0,
+        )
+        train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")
+        train_dataloader = torch.utils.data.DataLoader(
+            dataset_train,
+            num_workers=train_config.num_workers_dataloader,
+            pin_memory=False,
+            **train_dl_kwargs,
         )
     else:
         train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")
