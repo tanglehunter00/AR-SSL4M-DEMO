@@ -9,8 +9,20 @@ from typing import Optional
 import numpy as np
 import torch
 
+import shutil
+
 from image_dataset import get_custom_dataset
 from utils.brats_cache_manager import BraTSHybridCacheManager, _load_sample_from_local
+
+
+def _clear_brats_cache_dir(cache_root: str) -> None:
+    """清空 BraTS 本地缓存目录，避免残留导致 FileNotFoundError"""
+    if os.path.isdir(cache_root):
+        try:
+            shutil.rmtree(cache_root, ignore_errors=True)
+            os.makedirs(cache_root, exist_ok=True)
+        except OSError:
+            pass
 
 
 def _is_brats_entry(ann: str) -> bool:
@@ -82,6 +94,8 @@ class HybridDataset(torch.utils.data.Dataset):
         contrast_path = getattr(dataset_config, 'contrast_path', '')
         self._brats_cache: Optional[BraTSHybridCacheManager] = None
         if contrast_path and os.path.exists(contrast_path) and os.path.getsize(contrast_path) > 0:
+            # 启动时清空本地缓存，避免之前运行残留导致 FileNotFoundError
+            _clear_brats_cache_dir(local_cache_root)
             self._brats_cache = BraTSHybridCacheManager(
                 contrast_path=contrast_path,
                 local_cache_root=local_cache_root,

@@ -170,9 +170,10 @@ def main(**kwargs):
             verbose=not train_config.enable_fsdp or rank == 0,
         )
         train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")
+        # BraTS 用后即删与多 worker 不兼容：各 worker 共享磁盘文件但各自维护 _remaining，会导致已删样本被其它 worker 再次加载
+        train_dl_kwargs["num_workers"] = 0
         train_dataloader = torch.utils.data.DataLoader(
             dataset_train,
-            num_workers=train_config.num_workers_dataloader,
             pin_memory=False,
             **train_dl_kwargs,
         )

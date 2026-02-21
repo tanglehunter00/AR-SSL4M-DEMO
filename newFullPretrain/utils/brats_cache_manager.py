@@ -10,6 +10,7 @@ import shutil
 import tarfile
 import threading
 import time
+from contextlib import contextmanager
 from collections import defaultdict
 from typing import List, Tuple, Optional, Dict
 
@@ -57,6 +58,7 @@ def _load_sample_from_local(local_extract_dir: str, base_path: str) -> np.ndarra
     return np.concatenate(arrays, axis=-1)
 
 
+@contextmanager
 def _file_lock_context(lock_path: str):
     """跨进程文件锁，避免多 worker 同时复制/解压同一 tar"""
     if _HAS_FCNTL:
@@ -405,16 +407,21 @@ class BraTSHybridCacheManager:
         local_extract = os.path.join(self.local_cache_root, f"hybrid_{tar_idx}_{tar_name}")
         lock_path = os.path.join(self.local_cache_root, f".lock_hybrid_{tar_idx}")
 
-        if os.path.isdir(local_extract) and all(
-            os.path.exists(os.path.join(local_extract, b + '.t1n.npy')) for b in bases[:1]
-        ):
+        def _add_tar_to_pool():
+            """仅将文件实际存在的样本加入 _remaining，避免残留缓存导致 FileNotFoundError"""
             with self._lock:
                 if tar_idx not in self._local_tars:
                     self._local_tars[tar_idx] = local_extract
                     self._local_tar_paths[tar_idx] = local_tar
                     for i, b in enumerate(bases):
-                        self._remaining.append((tar_idx, i, local_extract))
+                        if os.path.exists(os.path.join(local_extract, b + '.t1n.npy')):
+                            self._remaining.append((tar_idx, i, local_extract))
                     self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+
+        if os.path.isdir(local_extract) and all(
+            os.path.exists(os.path.join(local_extract, b + '.t1n.npy')) for b in bases[:1]
+        ):
+            _add_tar_to_pool()
             return
 
         with _file_lock_context(lock_path):
@@ -424,13 +431,7 @@ class BraTSHybridCacheManager:
             if os.path.isdir(local_extract) and all(
                 os.path.exists(os.path.join(local_extract, b + '.t1n.npy')) for b in bases[:1]
             ):
-                with self._lock:
-                    if tar_idx not in self._local_tars:
-                        self._local_tars[tar_idx] = local_extract
-                        self._local_tar_paths[tar_idx] = local_tar
-                        for i, b in enumerate(bases):
-                            self._remaining.append((tar_idx, i, local_extract))
-                        self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+                _add_tar_to_pool()
                 return
 
             if self.verbose:
@@ -477,39 +478,50 @@ class BraTSHybridCacheManager:
             if self.verbose:
                 print(f"  [解压] {os.path.basename(tar_path)}: {time.perf_counter()-t0:.2f}s")
 
-            with self._lock:
-                if tar_idx not in self._local_tars:
-                    self._local_tars[tar_idx] = local_extract
-                    self._local_tar_paths[tar_idx] = local_tar
-                    for i, b in enumerate(bases):
-                        self._remaining.append((tar_idx, i, local_extract))
-                    self._loaded_tar_range = max(self._loaded_tar_range, tar_idx + 1)
+            _add_tar_to_pool()
 
     def get_batch_samples(self, n: int) -> List[Tuple[str, str, str]]:
         """
         从本地剩余样本中随机抽取 n 个，返回 (tar_path, base_path, local_dir)。
         抽取后从池中移除，用完后需调用 mark_batch_used 删除 npy。
+        仅返回文件实际存在的样本，不存在的从池中剔除。
         """
         self._ensure_min_local()
-        with self._lock:
-            pool = list(self._remaining)
-        if len(pool) < n:
-            raise RuntimeError(f"[BraTS 混训缓存] 本地剩余 {len(pool)} 个样本，需要 {n} 个")
-
-        chosen = random.sample(pool, n)
-        base_by_tar = self.tar_samples
-
         batch = []
-        with self._lock:
+        max_attempts = n * 3
+        attempts = 0
+        while len(batch) < n and attempts < max_attempts:
+            attempts += 1
+            with self._lock:
+                pool = list(self._remaining)
+            if len(pool) < n - len(batch):
+                self._ensure_min_local()
+                with self._lock:
+                    pool = list(self._remaining)
+            if not pool:
+                break
+            take = min(n - len(batch), len(pool))
+            chosen = random.sample(pool, take)
+            base_by_tar = self.tar_samples
+
+            valid = []
             chosen_set = set((t, i) for t, i, _ in chosen)
-            self._remaining = [(t, i, d) for t, i, d in self._remaining if (t, i) not in chosen_set]
+            for tar_idx, base_idx, local_dir in chosen:
+                tar_path, bases = base_by_tar[tar_idx]
+                base_path = bases[base_idx]
+                p = os.path.join(local_dir, base_path + '.t1n.npy')
+                if os.path.exists(p):
+                    valid.append((tar_path, base_path, local_dir))
 
-        for tar_idx, base_idx, local_dir in chosen:
-            tar_path, bases = base_by_tar[tar_idx]
-            base_path = bases[base_idx]
-            batch.append((tar_path, base_path, local_dir))
+            with self._lock:
+                self._remaining = [(t, i, d) for t, i, d in self._remaining if (t, i) not in chosen_set]
+            batch.extend(valid)
 
-        return batch
+        if len(batch) < n:
+            raise RuntimeError(
+                f"[BraTS 混训缓存] 仅获得 {len(batch)}/{n} 个有效样本，本地可能残留损坏缓存，请删除 {self.local_cache_root} 后重试"
+            )
+        return batch[:n]
 
     def mark_batch_used(self, batch_info: List[Tuple[str, str, str]]) -> None:
         """标记已使用，删除对应 npy，本 epoch 内不可再用"""
