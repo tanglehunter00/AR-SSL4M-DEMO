@@ -83,7 +83,7 @@ class get_custom_dataset(Dataset):
     def __getitem__(self, index):
         ann = self.ann[index]
 
-        if 'patch_random_spatial' in ann:
+        if 'patch_random_spatial' in ann or 'patch_random_lidc' in ann:
             input_image = load_npy(ann)
             start, stride = random.randint(0, 63), 8
             z_size = self.img_size[2] // self.series_length
@@ -100,11 +100,18 @@ class get_custom_dataset(Dataset):
                 ann_split_list = [f"{base}.t1n.npy", f"{base}.t1c.npy", f"{base}.t2w.npy", f"{base}.t2f.npy"]
             for split_id, ann_split in enumerate(ann_split_list):
                 input_image_single = load_npy(ann_split.strip())
-                input_image_single = torch.tensor(input_image_single)
+                input_image_single = torch.tensor(input_image_single, dtype=torch.float32)
                 if split_id == 0:
                     input_image = input_image_single
                 else:
                     input_image = torch.cat((input_image, input_image_single), dim=-1)
+            # 原始逻辑：4×(128,128,32) concat -> (128,128,128)。若 shape 不符则 resize 以保证混合训练兼容
+            target_shape = tuple(self.img_size)
+            if tuple(input_image.shape) != target_shape:
+                import torch.nn.functional as F
+                x = input_image.unsqueeze(0).unsqueeze(0)
+                x = F.interpolate(x, size=target_shape, mode='trilinear', align_corners=False)
+                input_image = x.squeeze(0).squeeze(0)
             input_image = input_image.flatten()
 
         input_ids = torch.tensor([1] + [3] * self.grid_length + [2], dtype=torch.int64)
