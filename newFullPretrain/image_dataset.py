@@ -5,8 +5,11 @@ import torch
 import random
 import tarfile
 import numpy as np
+from pathlib import Path
 
 from torch.utils.data import Dataset
+
+from utils.drive_np_cache import DriveNpCache, is_drive_mount_path
 
 
 def _np_load_with_retry(path, *, max_attempts=6, base_sleep_s=0.35):
@@ -88,6 +91,15 @@ class get_custom_dataset(Dataset):
         # PrefetchingGCSTrainDataLoader 会在每个 batch 前填入 gs:// -> 本地临时路径
         self._gcs_local_rewrite: dict = {}
 
+        self._drive_np_cache = None
+        self._batch_timing_acc = None
+        self._gcs_staged_root = None
+        _enable_dc = getattr(dataset_config, "drive_np_cache_enable", True)
+        _max_gb = float(getattr(dataset_config, "drive_np_cache_max_gb", 28.0))
+        _dc_dir = getattr(dataset_config, "drive_np_cache_dir", "/content/drive_np_cache")
+        if _enable_dc and _max_gb > 0:
+            self._drive_np_cache = DriveNpCache(_dc_dir, int(_max_gb * (1024 ** 3)))
+
         length = len(self.ann)
         if partition == "train":
             self.ann = [self.ann[i] for i in range(length) if i % 500 != 0]
@@ -104,12 +116,48 @@ class get_custom_dataset(Dataset):
             return m[p]
         return p
 
+    def reset_batch_io_timing(self) -> None:
+        self._batch_timing_acc = {}
+
+    def _path_is_gcs_staged(self, path: str) -> bool:
+        root = getattr(self, "_gcs_staged_root", None)
+        if not root:
+            return False
+        try:
+            return Path(path).resolve().is_relative_to(Path(root).resolve())
+        except (ValueError, OSError):
+            return False
+
+    def _final_np_path_for_load(self, path_str: str) -> str:
+        p = self._resolve_load_path(path_str).strip()
+        cache = getattr(self, "_drive_np_cache", None)
+        acc = getattr(self, "_batch_timing_acc", None)
+        if cache is not None:
+            return cache.get_local_path(p, acc)
+        return p
+
+    def _np_load_accounted(self, path_str: str):
+        final = self._final_np_path_for_load(path_str)
+        acc = getattr(self, "_batch_timing_acc", None)
+        t0 = time.perf_counter()
+        arr = _np_load_with_retry(final)
+        dt = time.perf_counter() - t0
+        if acc is not None:
+            if self._path_is_gcs_staged(final):
+                key = "gcs_staged_np_load_s"
+            elif is_drive_mount_path(final):
+                key = "drive_mount_np_load_s"
+            else:
+                key = "local_np_load_s"
+            acc[key] = acc.get(key, 0.0) + dt
+        return arr
+
     def __getitem__(self, index):
         ann = self.ann[index]
 
         # Spatial: patch_random_spatial or patch_random_lidc (128^3 single file)
         if 'patch_random_spatial' in ann or 'patch_random_lidc' in ann:
-            input_image = _np_load_with_retry(self._resolve_load_path(ann))
+            input_image = self._np_load_accounted(ann)
             start, stride = random.randint(0, 63), 8
             z_size = self.img_size[2] // self.series_length
             input_image = torch.tensor(input_image)
@@ -131,7 +179,7 @@ class get_custom_dataset(Dataset):
         elif ',' in ann:
             ann_split_list = ann.split(',')
             for split_id, ann_split in enumerate(ann_split_list):
-                input_image_single = _np_load_with_retry(self._resolve_load_path(ann_split.strip()))
+                input_image_single = self._np_load_accounted(ann_split.strip())
                 input_image_single = torch.tensor(input_image_single)
                 if split_id == 0:
                     input_image = input_image_single
@@ -140,10 +188,13 @@ class get_custom_dataset(Dataset):
             input_image = input_image.flatten()
         # Inventory spatial: single .npy per line (local path or gcsfuse mount; bare gs:// unsupported)
         elif ann.strip().endswith('.npy'):
-            input_image = _np_load_with_retry(self._resolve_load_path(ann.strip()))
+            input_image = self._np_load_accounted(ann.strip())
             input_image = torch.tensor(input_image.astype(np.float32)).flatten()
         else:
             raise ValueError(f"Unrecognized sample line: {ann[:120]}...")
+
+        acc = getattr(self, "_batch_timing_acc", None)
+        t_pack = time.perf_counter()
 
         input_ids = torch.tensor([1] + [3] * self.grid_length + [2], dtype=torch.int64)
         attention_mask = torch.ones(self.grid_length + 2, self.grid_length + 2, dtype=torch.bool).tril(diagonal=0)
@@ -157,10 +208,13 @@ class get_custom_dataset(Dataset):
         attention_mask[:, :prefix_length + 1] = 1
         attention_mask = attention_mask.flatten()
 
-        return {
+        out = {
             "input_ids": np.array(input_ids),
             "input_image": np.array(input_image),
             "attention_mask": np.array(attention_mask),
             "prefix_mask": np.array(prefix_mask),
-            "file_path": ann,  # 文件路径，用于训练时打印
+            "file_path": ann,
         }
+        if acc is not None:
+            acc["tensor_pack_s"] = acc.get("tensor_pack_s", 0.0) + time.perf_counter() - t_pack
+        return out

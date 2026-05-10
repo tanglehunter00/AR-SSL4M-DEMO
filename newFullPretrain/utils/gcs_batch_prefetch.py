@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -15,6 +16,26 @@ from typing import Dict, List, Optional
 from transformers import default_data_collator
 
 from data.sampler import LengthBasedBatchSampler
+
+
+def _leaf_dataset(ds):
+    """HybridDataset 等指标挂在 _base 上。"""
+    return getattr(ds, "_base", ds)
+
+
+def _apply_gcs_rewrite(dataset, uri_map: Dict[str, str]) -> None:
+    m = dict(uri_map)
+    dataset._gcs_local_rewrite = m
+    base = getattr(dataset, "_base", None)
+    if base is not None:
+        base._gcs_local_rewrite = m
+
+
+def _clear_gcs_rewrite(dataset) -> None:
+    dataset._gcs_local_rewrite = {}
+    base = getattr(dataset, "_base", None)
+    if base is not None:
+        base._gcs_local_rewrite = {}
 
 
 def gcs_uris_in_annotation(ann: str) -> List[str]:
@@ -113,6 +134,7 @@ class PrefetchingGCSTrainDataLoader:
         self._executor = ThreadPoolExecutor(max_workers=self.max_download_workers)
         self._epoch_id = 0
         self._lock = threading.Lock()
+        self.last_batch_io_stats: Dict[str, float] = {}
 
         if not hasattr(self._dataset, "_gcs_local_rewrite"):
             self._dataset._gcs_local_rewrite = {}
@@ -188,15 +210,35 @@ class PrefetchingGCSTrainDataLoader:
                 self._schedule(futures, bi + horizon, batches, epoch_id)
 
                 fut = futures.pop(bi)
+                t0 = time.perf_counter()
                 uri_map = fut.result()
+                gcs_download_s = time.perf_counter() - t0
 
-                self._dataset._gcs_local_rewrite = dict(uri_map)
+                leaf = _leaf_dataset(self._dataset)
+                if hasattr(leaf, "reset_batch_io_timing"):
+                    leaf.reset_batch_io_timing()
+                leaf._gcs_staged_root = str(self.cache_root.resolve())
+
+                _apply_gcs_rewrite(self._dataset, uri_map)
                 try:
+                    t_build = time.perf_counter()
                     samples = [self._dataset[idx] for idx in batch_indices]
+                    dataset_wall_s = time.perf_counter() - t_build
                     batch = default_data_collator(samples)
+                    acc = getattr(leaf, "_batch_timing_acc", None) or {}
+                    self.last_batch_io_stats = {
+                        "gcs_download_s": float(gcs_download_s),
+                        "dataset_wall_s": float(dataset_wall_s),
+                        "drive_cache_copy_s": float(acc.get("drive_cache_copy_s", 0.0)),
+                        "gcs_staged_np_load_s": float(acc.get("gcs_staged_np_load_s", 0.0)),
+                        "local_np_load_s": float(acc.get("local_np_load_s", 0.0)),
+                        "drive_mount_np_load_s": float(acc.get("drive_mount_np_load_s", 0.0)),
+                        "tensor_pack_s": float(acc.get("tensor_pack_s", 0.0)),
+                    }
                     yield batch
                 finally:
-                    self._dataset._gcs_local_rewrite = {}
+                    _clear_gcs_rewrite(self._dataset)
+                    leaf._gcs_staged_root = None
                     self._evict_uri_map(uri_map)
         finally:
             pending = list(futures.values())
