@@ -1,11 +1,32 @@
 import io
 import os
+import time
 import torch
 import random
 import tarfile
 import numpy as np
 
 from torch.utils.data import Dataset
+
+
+def _np_load_with_retry(path, *, max_attempts=6, base_sleep_s=0.35):
+    """Retry np.load on transient I/O (e.g. Google Drive mount EIO)."""
+    path = os.fspath(path)
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return np.load(path)
+        except OSError as e:
+            last_exc = e
+            en = getattr(e, "errno", None)
+            transient = en == 5 or en == 11 or (
+                en is None and "Input/output error" in str(e)
+            )
+            if transient and attempt + 1 < max_attempts:
+                time.sleep(min(base_sleep_s * (2 ** attempt), 8.0))
+                continue
+            raise
+    raise last_exc
 
 
 def read_txt(filepath):
@@ -88,7 +109,7 @@ class get_custom_dataset(Dataset):
 
         # Spatial: patch_random_spatial or patch_random_lidc (128^3 single file)
         if 'patch_random_spatial' in ann or 'patch_random_lidc' in ann:
-            input_image = np.load(self._resolve_load_path(ann))
+            input_image = _np_load_with_retry(self._resolve_load_path(ann))
             start, stride = random.randint(0, 63), 8
             z_size = self.img_size[2] // self.series_length
             input_image = torch.tensor(input_image)
@@ -110,7 +131,7 @@ class get_custom_dataset(Dataset):
         elif ',' in ann:
             ann_split_list = ann.split(',')
             for split_id, ann_split in enumerate(ann_split_list):
-                input_image_single = np.load(self._resolve_load_path(ann_split.strip()))
+                input_image_single = _np_load_with_retry(self._resolve_load_path(ann_split.strip()))
                 input_image_single = torch.tensor(input_image_single)
                 if split_id == 0:
                     input_image = input_image_single
@@ -119,7 +140,7 @@ class get_custom_dataset(Dataset):
             input_image = input_image.flatten()
         # Inventory spatial: single .npy per line (local path or gcsfuse mount; bare gs:// unsupported)
         elif ann.strip().endswith('.npy'):
-            input_image = np.load(self._resolve_load_path(ann.strip()))
+            input_image = _np_load_with_retry(self._resolve_load_path(ann.strip()))
             input_image = torch.tensor(input_image.astype(np.float32)).flatten()
         else:
             raise ValueError(f"Unrecognized sample line: {ann[:120]}...")
