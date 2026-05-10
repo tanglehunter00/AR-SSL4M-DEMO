@@ -3,6 +3,7 @@ import time
 
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
@@ -162,12 +163,14 @@ def save_model_checkpoint_base(
         rank,
         cfg,
         epoch=1,
+        best_val_loss: Optional[float] = None,
 ):
-
+    """保存训练断点：model + optimizer + next_epoch + best_val_loss（format_version=2）。"""
     cpu_state = model.state_dict()
+    opt_state = optimizer.state_dict() if optimizer is not None else None
+    eff_best = float("inf") if best_val_loss is None else float(best_val_loss)
 
-    print(f"--> saving model ...")
-    # create save path
+    print(f"--> saving resume checkpoint (model+optimizer+next_epoch)...")
     folder_name = (
             cfg.output_dir
             + "/checkpoints"
@@ -179,10 +182,61 @@ def save_model_checkpoint_base(
     save_name = str(epoch) + ".pth"
     save_full_path = str(save_dir) + "/" + save_name
 
-    # save model
-    torch.save(cpu_state, save_full_path)
+    bundle = {
+        "format_version": 2,
+        "model": cpu_state,
+        "optimizer": opt_state,
+        "next_epoch": int(epoch) + 1,
+        "best_val_loss": eff_best,
+    }
+    torch.save(bundle, save_full_path)
 
-    print(f"model checkpoint saved for epoch {epoch} at {save_full_path}\n")
+    print(f"resume checkpoint saved for completed_epoch={epoch} next_epoch={bundle['next_epoch']} at {save_full_path}\n")
+
+
+def resolve_resume_checkpoint_path(output_dir: str, explicit_path: str):
+    """
+    返回可用于 torch.load 的 .pth 路径。
+    explicit_path 非空则使用该路径（须存在）；
+    否则在 output_dir/checkpoints/<epoch>/<epoch>.pth 中选 epoch 最大者。
+    """
+    explicit_path = (explicit_path or "").strip()
+    if explicit_path:
+        p = Path(explicit_path)
+        return str(p.resolve()) if p.is_file() else None
+    root = Path(output_dir) / "checkpoints"
+    if not root.is_dir():
+        return None
+    best_ep = -1
+    best_path: Optional[Path] = None
+    for sub in root.iterdir():
+        if not sub.is_dir():
+            continue
+        try:
+            ep = int(sub.name)
+        except ValueError:
+            continue
+        cand = sub / f"{ep}.pth"
+        if cand.is_file() and ep > best_ep:
+            best_ep = ep
+            best_path = cand
+    return str(best_path.resolve()) if best_path is not None else None
+
+
+def parse_training_checkpoint(blob):
+    """
+    解析 .pth：format_version==2 为断点 bundle；否则视为旧版纯 model.state_dict()。
+    返回 (model_state_dict, optimizer_state_dict_or_None, next_epoch, best_val_loss, is_legacy)。
+    """
+    if isinstance(blob, dict) and blob.get("format_version") == 2 and "model" in blob:
+        return (
+            blob["model"],
+            blob.get("optimizer"),
+            int(blob.get("next_epoch", 0)),
+            float(blob.get("best_val_loss", float("inf"))),
+            False,
+        )
+    return blob, None, 0, float("inf"), True
 
 
 def load_model_checkpoint(model, rank, cfg):

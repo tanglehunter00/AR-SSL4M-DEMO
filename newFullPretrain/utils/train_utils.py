@@ -21,6 +21,19 @@ from policies import fpSixteen,bfSixteen, get_llama_wrapper
 from utils.memory_utils import MemoryTrace
 
 
+def _loss_log_should_write(train_config, rank) -> bool:
+    if train_config.enable_fsdp:
+        return rank == 0
+    return True
+
+
+def _loss_log_write(fp, line: str) -> None:
+    if fp is None:
+        return
+    fp.write(line if line.endswith("\n") else line + "\n")
+    fp.flush()
+
+
 def adjust_learning_rate(optimizer, epoch, train_config):
     """Decay the learning rate with half-cycle cosine after warmup"""
     if epoch < train_config.warmup_epochs:
@@ -36,7 +49,7 @@ def adjust_learning_rate(optimizer, epoch, train_config):
     return lr
 
 
-def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulation_steps, train_config, dataset_config, fsdp_config=None, local_rank=None, rank=None, test_dataloader=None):
+def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulation_steps, train_config, dataset_config, fsdp_config=None, local_rank=None, rank=None, test_dataloader=None, start_epoch=0, resume_best_val_loss=float("inf")):
     """
     Trains the model on the given dataloader
 
@@ -76,8 +89,29 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
     epoch_times = []
     checkpoint_times = []
     results = {}
-    best_val_loss = float("inf")
-    for epoch in range(train_config.num_epochs):
+    best_val_loss = float(resume_best_val_loss)
+
+    loss_log_fp = None
+    loss_log_path = None
+    if _loss_log_should_write(train_config, rank):
+        os.makedirs(train_config.output_dir, exist_ok=True)
+        loss_log_path = os.path.join(train_config.output_dir, "training_batch_epoch_loss.txt")
+        loss_log_fp = open(loss_log_path, "w", encoding="utf-8")
+        loss_log_fp.write(
+            f"# training loss log | started={datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}\n"
+            "# batch: epoch=<n> step=<i>/<total> batch_loss=<float>\n"
+            "# epoch train avg: epoch=<n> epoch_avg_train_loss=<float>\n"
+            "# epoch eval (if any): epoch=<n> eval_loss=<float>\n"
+        )
+        loss_log_fp.flush()
+
+    if start_epoch > 0:
+        print(
+            f"--> resume: starting at epoch index {start_epoch} "
+            f"(display epoch {start_epoch + 1}/{train_config.num_epochs}), best_val_loss={best_val_loss}"
+        )
+
+    for epoch in range(start_epoch, train_config.num_epochs):
         epoch_start_time = time.perf_counter()
         # 混训 BraTS 缓存：每 epoch 重置，使上轮消费的样本可在本 epoch 重新使用
         if hasattr(train_dataloader, 'dataset') and hasattr(train_dataloader.dataset, '_brats_cache'):
@@ -187,6 +221,10 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                         )
                         for fp in step_file_paths_list:
                             tqdm.write(f"  文件: {fp}")
+                        _loss_log_write(
+                            loss_log_fp,
+                            f"epoch={epoch + 1} step={opt_step}/{total_length} batch_loss={avg_loss:.8f}",
+                        )
                 else:
                     # regular backpropagation when fp16 is not used
                     t0 = time.perf_counter()
@@ -226,6 +264,10 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                         )
                         for fp in step_file_paths_list:
                             tqdm.write(f"  文件: {fp}")
+                        _loss_log_write(
+                            loss_log_fp,
+                            f"epoch={epoch + 1} step={opt_step}/{total_length} batch_loss={avg_loss:.8f}",
+                        )
 
                 # 为本轮循环结束计时，供下一轮 DataLoader 耗时计算
                 t_dataloader_start = time.perf_counter()
@@ -243,7 +285,11 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
         if train_config.enable_fsdp:
             train_epoch_loss = train_epoch_loss/world_size
         train_loss.append(float(train_epoch_loss))
-        
+        _loss_log_write(
+            loss_log_fp,
+            f"epoch={epoch + 1} epoch_avg_train_loss={float(train_epoch_loss):.8f}",
+        )
+
         if train_config.enable_fsdp:
             if rank==0:
                 print(f"Max CUDA memory allocated was {memtrace.peak} GB")
@@ -262,6 +308,10 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
             if test_dataloader is not None:
                 evaluation(model, train_config, test_dataloader, local_rank, epoch, dataset_config, 'test')
             eval_epoch_loss, temp_val_loss = evaluation(model, train_config, eval_dataloader, local_rank)
+            _loss_log_write(
+                loss_log_fp,
+                f"epoch={epoch + 1} eval_loss={float(eval_epoch_loss):.8f}",
+            )
             if train_config.save_metrics:
                 val_step_loss.extend(temp_val_loss)
 
@@ -269,9 +319,15 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
             if train_config.save_model and (eval_epoch_loss < best_val_loss or (epoch + 1) % 10 == 0):
                 if train_config.enable_fsdp:
                     dist.barrier()
+                effective_best = min(best_val_loss, float(eval_epoch_loss))
                 if not train_config.enable_fsdp:
                     save_model_checkpoint_base(
-                        model, optimizer, rank, train_config, epoch=epoch
+                        model,
+                        optimizer,
+                        rank,
+                        train_config,
+                        epoch=epoch,
+                        best_val_loss=effective_best,
                     )
                 else:
                     if fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
@@ -329,6 +385,10 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
     results["avg_checkpoint_time"] = avg_checkpoint_time
     if train_config.save_metrics:
         results["metrics_filename"] = metrics_filename
+
+    if loss_log_fp is not None:
+        loss_log_fp.close()
+        results["batch_epoch_loss_log"] = loss_log_path
 
     #saving the training params including fsdp setting for reference.
     if train_config.enable_fsdp:
