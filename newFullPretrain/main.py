@@ -274,7 +274,8 @@ def main(**kwargs):
             print(
                 f"--> GCS batch prefetch: ahead_batches={train_config.gcs_prefetch_ahead_batches}, "
                 f"cache_root={train_config.gcs_prefetch_cache_root}, "
-                f"download_workers={train_config.gcs_prefetch_download_workers}"
+                f"download_workers={train_config.gcs_prefetch_download_workers}, "
+                f"drive_workers={train_config.gcs_prefetch_drive_workers}"
             )
         train_dataloader = PrefetchingGCSTrainDataLoader(
             dataset_train,
@@ -282,6 +283,7 @@ def main(**kwargs):
             prefetch_ahead_batches=train_config.gcs_prefetch_ahead_batches,
             local_cache_root=train_config.gcs_prefetch_cache_root,
             max_download_workers=train_config.gcs_prefetch_download_workers,
+            max_drive_copy_workers=train_config.gcs_prefetch_drive_workers,
         )
     else:
         train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, "train")

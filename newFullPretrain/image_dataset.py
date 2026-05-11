@@ -112,8 +112,14 @@ class get_custom_dataset(Dataset):
     def _resolve_load_path(self, path_str: str) -> str:
         p = (path_str or "").strip()
         m = getattr(self, "_gcs_local_rewrite", None)
-        if m and p in m:
+        if not m:
+            return p
+        if p in m:
             return m[p]
+        if not p.startswith("gs://"):
+            pn = os.path.normpath(os.path.abspath(os.fspath(p)))
+            if pn in m:
+                return m[pn]
         return p
 
     def reset_batch_io_timing(self) -> None:
@@ -144,7 +150,11 @@ class get_custom_dataset(Dataset):
         dt = time.perf_counter() - t0
         if acc is not None:
             if self._path_is_gcs_staged(final):
-                key = "gcs_staged_np_load_s"
+                name = Path(final).name
+                if name.startswith("drv_"):
+                    key = "drive_staged_np_load_s"
+                else:
+                    key = "gcs_staged_np_load_s"
             elif is_drive_mount_path(final):
                 key = "drive_mount_np_load_s"
             else:
