@@ -209,9 +209,21 @@ class PrefetchingGCSTrainDataLoader:
         self._epoch_id = 0
         self._lock = threading.Lock()
         self.last_batch_io_stats: Dict[str, float] = {}
+        # 由 train() 在每 epoch 注入，与 LengthBasedBatchSampler 一致；支持从中途 batch 续训且不预取已跳过的 batch
+        self._planned_batches: Optional[List[List[int]]] = None
+        self._start_batch_idx: int = 0
 
         if not hasattr(self._dataset, "_gcs_local_rewrite"):
             self._dataset._gcs_local_rewrite = {}
+
+    def set_planned_batches(
+        self,
+        batches: List[List[int]],
+        start_batch_idx: int = 0,
+    ) -> None:
+        """下一轮 __iter__ 使用固定 batch 索引序列；可从 start_batch_idx 开始以支持 step 级断点续训。"""
+        self._planned_batches = batches
+        self._start_batch_idx = max(0, int(start_batch_idx))
 
     @property
     def dataset(self):
@@ -266,25 +278,33 @@ class PrefetchingGCSTrainDataLoader:
             self._epoch_id += 1
         epoch_id = self._epoch_id
 
-        sampler = LengthBasedBatchSampler(
-            self._dataset,
-            batch_size=self.batch_size,
-            drop_last=True,
-            shuffle=True,
-        )
-        batches: List[List[int]] = list(iter(sampler))
+        if self._planned_batches is not None:
+            batches = self._planned_batches
+            start_bi = self._start_batch_idx
+            self._planned_batches = None
+            self._start_batch_idx = 0
+        else:
+            sampler = LengthBasedBatchSampler(
+                self._dataset,
+                batch_size=self.batch_size,
+                drop_last=True,
+                shuffle=True,
+            )
+            batches = list(iter(sampler))
+            start_bi = 0
         n_batches = len(batches)
         futures: Dict[int, Future] = {}
 
         horizon = self.prefetch_ahead_batches
-        for k in range(min(horizon, n_batches)):
+        for k in range(start_bi, min(start_bi + horizon, n_batches)):
             self._schedule(futures, k, batches, epoch_id)
 
         try:
-            for bi, batch_indices in enumerate(batches):
+            for bi in range(start_bi, n_batches):
                 self._schedule(futures, bi + horizon, batches, epoch_id)
 
                 fut = futures.pop(bi)
+                batch_indices = batches[bi]
                 t_job_wait = time.perf_counter()
                 rewrite_map, phases = fut.result()
                 prefetch_job_wall_s = time.perf_counter() - t_job_wait
