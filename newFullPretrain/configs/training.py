@@ -33,7 +33,6 @@ class train_config:
     gcs_prefetch_ahead_batches: int = 16
     gcs_prefetch_cache_root: str = "/content/gcs_batch_cache"
     gcs_prefetch_download_workers: int = 16
-    gcs_prefetch_drive_workers: int = 16  # 每个 batch 内并行拷贝 Drive .npy 到 staging 的线程数
     drive_np_cache_enable: bool = True
     drive_np_cache_dir: str = "/content/drive_np_cache"
     drive_np_cache_max_gb: float = 28.0
