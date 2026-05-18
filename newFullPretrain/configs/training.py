@@ -39,10 +39,6 @@ class train_config:
     drive_np_cache_max_gb: float = 28.0
     resume_training: bool = False  # True：从 checkpoint 载入模型权重后再训练（优化器仍重新初始化；epoch 计数仍从 1 开始）
     resume_checkpoint_path: str = ""  # 留空则自动选用 output_dir/checkpoints 下 epoch 最大的 *.pth
-    # Step 级断点（Colab）：仅 non-FSDP + PrefetchingGCSTrainDataLoader（use_gcs_batch_prefetch=True）
-    step_checkpoint_every: int = 0  # 每多少个 dataloader batch 保存；0=关闭
-    step_checkpoint_dir: str = ""  # 默认空则使用 output_dir/step_checkpoints
-    step_resume_path: str = ""  # 断点 .pt 路径；填 auto 则选用 step_checkpoints 下最新修改的 step_*.pt
     scheduler:str='CosineLR'
     min_lr: float=0
     pos_type: str='sincos3d'

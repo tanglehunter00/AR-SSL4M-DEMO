@@ -72,12 +72,6 @@ def main(**kwargs):
     rp_env = os.environ.get("PRETRAIN_RESUME_CHECKPOINT_PATH", "").strip()
     if rp_env and "resume_checkpoint_path" not in merged:
         merged["resume_checkpoint_path"] = rp_env
-    env_step_every = os.environ.get("PRETRAIN_STEP_CHECKPOINT_EVERY", "").strip()
-    if env_step_every and "step_checkpoint_every" not in merged:
-        merged["step_checkpoint_every"] = int(env_step_every)
-    env_step_resume = os.environ.get("PRETRAIN_STEP_RESUME_PATH", "").strip()
-    if env_step_resume and "step_resume_path" not in merged:
-        merged["step_resume_path"] = env_step_resume
 
     # Update the configuration for the training and sharding process
     train_config, fsdp_config = TRAIN_CONFIG(), FSDP_CONFIG()
@@ -116,52 +110,10 @@ def main(**kwargs):
     resume_next_epoch = 0
     resume_best_val_loss = float("inf")
     resume_optimizer_state = None
-    step_resume_bundle = None
-    resume_scaler_state = None
 
     model = ReconModel(config)
 
-    srp = (getattr(train_config, "step_resume_path", "") or "").strip()
-    if srp.lower() == "auto":
-        from utils.step_checkpoint_utils import resolve_latest_step_checkpoint
-
-        srp = resolve_latest_step_checkpoint(train_config.output_dir) or ""
-
-    if srp:
-        if train_config.enable_fsdp:
-            raise RuntimeError("step 断点续训当前不支持 enable_fsdp=True")
-        from utils.step_checkpoint_utils import STEP_CK_FORMAT_VERSION
-
-        print(f"--> step_resume_path: loading\n    {srp}")
-        try:
-            sblob = torch.load(srp, map_location="cpu", weights_only=False)
-        except TypeError:
-            sblob = torch.load(srp, map_location="cpu")
-        if sblob.get("format_version") != STEP_CK_FORMAT_VERSION:
-            raise ValueError(
-                f"文件不是 step 断点 (expect format_version={STEP_CK_FORMAT_VERSION}): {srp}"
-            )
-        sincomp = model.load_state_dict(sblob["model"], strict=False)
-        print(
-            f"--> step_resume load_state_dict(strict=False) "
-            f"missing_keys={len(sincomp.missing_keys)} unexpected_keys={len(sincomp.unexpected_keys)}"
-        )
-        resume_optimizer_state = sblob.get("optimizer")
-        resume_next_epoch = int(sblob["epoch"])
-        resume_best_val_loss = float(sblob.get("best_val_loss", float("inf")))
-        resume_scaler_state = sblob.get("scaler")
-        step_resume_bundle = {
-            "epoch": int(sblob["epoch"]),
-            "next_step_in_epoch": int(sblob["next_step_in_epoch"]),
-            "epoch_batches": sblob["epoch_batches"],
-            "completed_npy_paths": list(sblob.get("completed_npy_paths", [])),
-        }
-        print(
-            f"--> step 断点：从 epoch 索引 {resume_next_epoch}（第 {resume_next_epoch + 1} 轮显示）"
-            f" 的 batch {step_resume_bundle['next_step_in_epoch']} 继续；"
-            f"best_val_loss={resume_best_val_loss}"
-        )
-    elif getattr(train_config, "resume_training", False):
+    if getattr(train_config, "resume_training", False):
         if train_config.enable_fsdp:
             raise RuntimeError(
                 "resume_training 当前仅支持 enable_fsdp=False（与本地 bundle checkpoint 对应）。"
@@ -397,8 +349,6 @@ def main(**kwargs):
         rank if train_config.enable_fsdp else None,
         start_epoch=resume_next_epoch,
         resume_best_val_loss=resume_best_val_loss,
-        step_resume_bundle=step_resume_bundle,
-        resume_scaler_state=resume_scaler_state,
     )
     if not train_config.enable_fsdp or rank==0:
         [print(f'Key: {k}, Value: {v}') for k, v in results.items()]

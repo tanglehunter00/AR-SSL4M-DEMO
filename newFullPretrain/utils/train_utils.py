@@ -16,16 +16,7 @@ from torch.distributed.fsdp import StateDictType
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from tqdm import tqdm
 
-from data.sampler import LengthBasedBatchSampler
 from utils.model_checkpointing_utils import save_model_checkpoint, save_model_checkpoint_base, save_model_and_optimizer_sharded, save_optimizer_checkpoint
-from utils.gcs_batch_prefetch import PrefetchingGCSTrainDataLoader
-from utils.step_checkpoint_utils import (
-    collect_npy_paths_from_annotation_rows,
-    model_param_shapes_summary,
-    pending_paths_in_remaining_batches,
-    save_step_checkpoint,
-    write_step_manifest,
-)
 from policies import fpSixteen,bfSixteen, get_llama_wrapper
 from utils.memory_utils import MemoryTrace
 
@@ -58,7 +49,7 @@ def adjust_learning_rate(optimizer, epoch, train_config):
     return lr
 
 
-def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulation_steps, train_config, dataset_config, fsdp_config=None, local_rank=None, rank=None, test_dataloader=None, start_epoch=0, resume_best_val_loss=float("inf"), step_resume_bundle=None, resume_scaler_state=None):
+def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulation_steps, train_config, dataset_config, fsdp_config=None, local_rank=None, rank=None, test_dataloader=None, start_epoch=0, resume_best_val_loss=float("inf")):
     """
     Trains the model on the given dataloader
 
@@ -81,16 +72,6 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
         scaler = ShardedGradScaler()
     elif train_config.use_fp16 and not train_config.enable_fsdp:
         scaler = torch.cuda.amp.GradScaler()
-    else:
-        scaler = None
-
-    if resume_scaler_state is not None and scaler is not None:
-        try:
-            scaler.load_state_dict(resume_scaler_state)
-            print("--> 已从 step 断点恢复 GradScaler")
-        except Exception as ex:
-            print(f"--> 警告：GradScaler 未能加载: {ex}")
-
     if train_config.enable_fsdp:
         world_size = int(os.environ["WORLD_SIZE"]) 
     # pdb.set_trace()
@@ -130,11 +111,6 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
             f"(display epoch {start_epoch + 1}/{train_config.num_epochs}), best_val_loss={best_val_loss}"
         )
 
-    completed_npy_paths = set()
-    pending_step_bundle = step_resume_bundle
-    step_ck_every = int(getattr(train_config, "step_checkpoint_every", 0) or 0)
-    need_step_planned = (step_ck_every > 0) or (pending_step_bundle is not None)
-
     for epoch in range(start_epoch, train_config.num_epochs):
         epoch_start_time = time.perf_counter()
         # 混训 BraTS 缓存：每 epoch 重置，使上轮消费的样本可在本 epoch 重新使用
@@ -142,42 +118,10 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
             cache = getattr(train_dataloader.dataset, '_brats_cache', None)
             if cache is not None and epoch > 0:
                 cache.reset_for_epoch()
-
-        epoch_batch_offset = 0
-        epoch_batches = None
-        if need_step_planned:
-            if train_config.enable_fsdp:
-                raise RuntimeError("step 级断点需要 enable_fsdp=False")
-            if not isinstance(train_dataloader, PrefetchingGCSTrainDataLoader):
-                raise RuntimeError(
-                    "step 级断点/续训需要 use_gcs_batch_prefetch=True（PrefetchingGCSTrainDataLoader）"
-                )
-            if pending_step_bundle is not None and int(pending_step_bundle.get("epoch", -1)) == epoch:
-                epoch_batches = pending_step_bundle["epoch_batches"]
-                epoch_batch_offset = int(pending_step_bundle["next_step_in_epoch"])
-                completed_npy_paths = set(pending_step_bundle.get("completed_npy_paths", []))
-                pending_step_bundle = None
-            else:
-                sampler = LengthBasedBatchSampler(
-                    train_dataloader.dataset,
-                    batch_size=train_dataloader.batch_size,
-                    drop_last=True,
-                    shuffle=True,
-                )
-                epoch_batches = list(iter(sampler))
-            train_dataloader.set_planned_batches(epoch_batches, start_batch_idx=epoch_batch_offset)
-            batches_per_epoch = len(epoch_batches)
-            batches_this_run = batches_per_epoch - epoch_batch_offset
-        else:
-            batches_per_epoch = len(train_dataloader)
-            batches_this_run = batches_per_epoch
-            epoch_batch_offset = 0
-
-        total_length = max(1, batches_this_run // gradient_accumulation_steps)
-
         with MemoryTrace() as memtrace:  # track the memory usage
             model.train()
             total_loss = 0.0
+            total_length = len(train_dataloader)//gradient_accumulation_steps
             pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
             t_dataloader_start = time.perf_counter()
             for step, batch in enumerate(train_dataloader):
@@ -226,17 +170,9 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                     step_io_dataset_wall_acc += float(io_stats.get("dataset_wall_s", 0.0))
                 if file_paths is not None:
                     step_file_paths_list.extend(file_paths if isinstance(file_paths, (list, tuple)) else [file_paths])
-                    for _p in collect_npy_paths_from_annotation_rows(
-                        file_paths if isinstance(file_paths, (list, tuple)) else [file_paths]
-                    ):
-                        completed_npy_paths.add(_p)
 
                 if train_config.scheduler == 'CosineLR':
-                    lr = adjust_learning_rate(
-                        optimizer,
-                        (epoch_batch_offset + step) / float(batches_per_epoch) + epoch,
-                        train_config,
-                    )
+                    lr = adjust_learning_rate(optimizer, step / len(train_dataloader) + epoch, train_config)
 
                 # 1. 数据到设备
                 t0 = time.perf_counter()
@@ -270,7 +206,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                     torch.cuda.synchronize() if torch.cuda.is_available() else None
                     step_backward_time += time.perf_counter() - t0
 
-                    if (step + 1) % gradient_accumulation_steps == 0 or step == batches_this_run - 1:
+                    if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                         # 4. 梯度裁剪
                         if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                             t0 = time.perf_counter()
@@ -324,7 +260,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                     torch.cuda.synchronize() if torch.cuda.is_available() else None
                     step_backward_time += time.perf_counter() - t0
 
-                    if (step + 1) % gradient_accumulation_steps == 0 or step == batches_this_run - 1:
+                    if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                         if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                             t0 = time.perf_counter()
                             if train_config.enable_fsdp:
@@ -367,56 +303,6 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                             f"epoch={epoch + 1} step={opt_step}/{total_length} batch_loss={avg_loss:.8f}",
                         )
 
-                # step 级断点（与 Colab Prefetch 路径对齐）
-                if step_ck_every > 0 and epoch_batches is not None and _loss_log_should_write(train_config, rank):
-                    global_done = epoch_batch_offset + step + 1
-                    if global_done % step_ck_every == 0:
-                        subdir = (getattr(train_config, "step_checkpoint_dir", "") or "").strip()
-                        if not subdir:
-                            subdir = os.path.join(train_config.output_dir, "step_checkpoints")
-                        os.makedirs(subdir, exist_ok=True)
-                        tag = f"step_ep{epoch + 1}_b{global_done}"
-                        pt_path = os.path.join(subdir, f"{tag}.pt")
-                        meta = {
-                            "lr": train_config.lr,
-                            "batch_size_training": train_config.batch_size_training,
-                            "num_epochs": train_config.num_epochs,
-                            "gradient_accumulation_steps": train_config.gradient_accumulation_steps,
-                            "seed": train_config.seed,
-                            "weight_decay": train_config.weight_decay,
-                        }
-                        scaler_sd = scaler.state_dict() if scaler is not None else None
-                        save_step_checkpoint(
-                            pt_path,
-                            model=model,
-                            optimizer=optimizer,
-                            scaler_state=scaler_sd,
-                            epoch=epoch,
-                            next_step_in_epoch=global_done,
-                            epoch_batches=epoch_batches,
-                            completed_npy_paths=completed_npy_paths,
-                            best_val_loss=best_val_loss,
-                            train_config_snapshot=meta,
-                        )
-                        pend, pend_n = pending_paths_in_remaining_batches(
-                            train_dataloader.dataset,
-                            epoch_batches,
-                            global_done,
-                            completed_npy_paths,
-                        )
-                        write_step_manifest(
-                            os.path.join(subdir, f"{tag}.json"),
-                            pt_path=pt_path,
-                            epoch=epoch,
-                            next_step_in_epoch=global_done,
-                            epoch_batches=epoch_batches,
-                            completed_npy_paths=completed_npy_paths,
-                            pending_paths=pend,
-                            pending_count=pend_n,
-                            param_summary=model_param_shapes_summary(model),
-                        )
-                        print(f"--> step checkpoint: {pt_path}", flush=True)
-
                 # 为本轮循环结束计时，供下一轮 DataLoader 耗时计算
                 t_dataloader_start = time.perf_counter()
 
@@ -429,7 +315,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
         # Reducing total_loss across all devices if there's more than one CUDA device
         if torch.cuda.device_count() > 1 and train_config.enable_fsdp:
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        train_epoch_loss = total_loss / max(1, batches_this_run)
+        train_epoch_loss = total_loss / len(train_dataloader)
         if train_config.enable_fsdp:
             train_epoch_loss = train_epoch_loss/world_size
         train_loss.append(float(train_epoch_loss))
