@@ -64,9 +64,6 @@ class get_custom_dataset(Dataset):
 
         self.ann = ann_spatial + ann_others
 
-        # PrefetchingGCSTrainDataLoader 会在每个 batch 前填入 gs:// -> 本地临时路径
-        self._gcs_local_rewrite: dict = {}
-
         length = len(self.ann)
         if partition == "train":
             self.ann = [self.ann[i] for i in range(length) if i % 500 != 0]
@@ -76,19 +73,12 @@ class get_custom_dataset(Dataset):
     def __len__(self):
         return len(self.ann)
 
-    def _resolve_load_path(self, path_str: str) -> str:
-        p = (path_str or "").strip()
-        m = getattr(self, "_gcs_local_rewrite", None)
-        if m and p in m:
-            return m[p]
-        return p
-
     def __getitem__(self, index):
         ann = self.ann[index]
 
         # Spatial: patch_random_spatial or patch_random_lidc (128^3 single file)
         if 'patch_random_spatial' in ann or 'patch_random_lidc' in ann:
-            input_image = np.load(self._resolve_load_path(ann))
+            input_image = np.load(ann)
             start, stride = random.randint(0, 63), 8
             z_size = self.img_size[2] // self.series_length
             input_image = torch.tensor(input_image)
@@ -96,33 +86,27 @@ class get_custom_dataset(Dataset):
                                      input_image[..., start + stride: start + stride + z_size],
                                      input_image[..., start + 2 * stride: start + 2 * stride + z_size],
                                      input_image[..., start + 3 * stride: start + 3 * stride + z_size]), dim=-1).flatten()
-        # BraTS contrast: path.tar.gz:member_prefix (does not match gs://…)
-        elif '.tar.gz:' in ann and ',' not in ann:
-            tar_part, base_path = ann.split('.tar.gz:', 1)
-            tar_path = tar_part + '.tar.gz'
-            if os.path.exists(tar_path):
+        # BraTS contrast: tar_path:base_path (load 4 npy from tar without extract)
+        elif ':' in ann and ann.count(',') == 0:
+            parts = ann.split(':', 1)
+            if len(parts) == 2 and parts[0].endswith('.tar.gz') and os.path.exists(parts[0]):
+                tar_path, base_path = parts[0], parts[1]
                 input_image = _load_from_tar(tar_path, base_path)
                 input_image = torch.tensor(input_image).float()
                 input_image = input_image.flatten()
             else:
-                raise ValueError(f"Tar not found or invalid: {ann[:120]}...")
+                raise ValueError(f"Invalid tar format or file not found: {ann[:80]}...")
         # Semantic / legacy contrast: comma-separated paths (4 files)
-        elif ',' in ann:
+        else:
             ann_split_list = ann.split(',')
             for split_id, ann_split in enumerate(ann_split_list):
-                input_image_single = np.load(self._resolve_load_path(ann_split.strip()))
+                input_image_single = np.load(ann_split.strip())
                 input_image_single = torch.tensor(input_image_single)
                 if split_id == 0:
                     input_image = input_image_single
                 else:
                     input_image = torch.cat((input_image, input_image_single), dim=-1)
             input_image = input_image.flatten()
-        # Inventory spatial: single .npy per line (local path or gcsfuse mount; bare gs:// unsupported)
-        elif ann.strip().endswith('.npy'):
-            input_image = np.load(self._resolve_load_path(ann.strip()))
-            input_image = torch.tensor(input_image.astype(np.float32)).flatten()
-        else:
-            raise ValueError(f"Unrecognized sample line: {ann[:120]}...")
 
         input_ids = torch.tensor([1] + [3] * self.grid_length + [2], dtype=torch.int64)
         attention_mask = torch.ones(self.grid_length + 2, self.grid_length + 2, dtype=torch.bool).tril(diagonal=0)
