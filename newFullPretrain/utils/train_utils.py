@@ -144,24 +144,8 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                     step_loss_sum = 0.0
                     step_batch_count = 0
                     step_file_paths_list = []
-                    step_io_gcs_dl_acc = 0.0
-                    step_io_drive_copy_acc = 0.0
-                    step_io_gcs_read_acc = 0.0
-                    step_io_local_np_acc = 0.0
-                    step_io_drive_mount_acc = 0.0
-                    step_io_pack_acc = 0.0
-                    step_io_dataset_wall_acc = 0.0
 
                 step_dataloader_time_acc += step_dataloader_time
-                io_stats = getattr(train_dataloader, "last_batch_io_stats", None)
-                if isinstance(io_stats, dict):
-                    step_io_gcs_dl_acc += float(io_stats.get("gcs_download_s", 0.0))
-                    step_io_drive_copy_acc += float(io_stats.get("drive_cache_copy_s", 0.0))
-                    step_io_gcs_read_acc += float(io_stats.get("gcs_staged_np_load_s", 0.0))
-                    step_io_local_np_acc += float(io_stats.get("local_np_load_s", 0.0))
-                    step_io_drive_mount_acc += float(io_stats.get("drive_mount_np_load_s", 0.0))
-                    step_io_pack_acc += float(io_stats.get("tensor_pack_s", 0.0))
-                    step_io_dataset_wall_acc += float(io_stats.get("dataset_wall_s", 0.0))
                 if file_paths is not None:
                     step_file_paths_list.extend(file_paths if isinstance(file_paths, (list, tuple)) else [file_paths])
 
@@ -233,11 +217,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                             f"前向: {step_forward_time:.3f}s | "
                             f"反向: {step_backward_time:.3f}s | "
                             f"梯度裁剪: {step_grad_clip_time:.3f}s | "
-                            f"优化器步进: {step_optimizer_time:.3f}s | "
-                            f"IO明细 gcs↓:{step_io_gcs_dl_acc:.3f}s gcs读:{step_io_gcs_read_acc:.3f}s "
-                            f"drive拷:{step_io_drive_copy_acc:.3f}s drive直读:{step_io_drive_mount_acc:.3f}s "
-                            f"本地np:{step_io_local_np_acc:.3f}s pack:{step_io_pack_acc:.3f}s "
-                            f"dataset串行:{step_io_dataset_wall_acc:.3f}s"
+                            f"优化器步进: {step_optimizer_time:.3f}s"
                         )
                         for fp in step_file_paths_list:
                             tqdm.write(f"  文件: {fp}")
@@ -280,11 +260,7 @@ def train(model, train_dataloader,eval_dataloader, optimizer, gradient_accumulat
                             f"前向: {step_forward_time:.3f}s | "
                             f"反向: {step_backward_time:.3f}s | "
                             f"梯度裁剪: {step_grad_clip_time:.3f}s | "
-                            f"优化器步进: {step_optimizer_time:.3f}s | "
-                            f"IO明细 gcs↓:{step_io_gcs_dl_acc:.3f}s gcs读:{step_io_gcs_read_acc:.3f}s "
-                            f"drive拷:{step_io_drive_copy_acc:.3f}s drive直读:{step_io_drive_mount_acc:.3f}s "
-                            f"本地np:{step_io_local_np_acc:.3f}s pack:{step_io_pack_acc:.3f}s "
-                            f"dataset串行:{step_io_dataset_wall_acc:.3f}s"
+                            f"优化器步进: {step_optimizer_time:.3f}s"
                         )
                         for fp in step_file_paths_list:
                             tqdm.write(f"  文件: {fp}")

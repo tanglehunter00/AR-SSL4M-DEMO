@@ -26,6 +26,3 @@ class custom_dataset:
     add_spatial_data = True
     is_subset = False
     series_length = 4
-    drive_np_cache_enable: bool = True
-    drive_np_cache_dir: str = "/content/drive_np_cache"
-    drive_np_cache_max_gb: float = 28.0
